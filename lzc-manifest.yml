@@ -1,0 +1,85 @@
+application:
+  subdomain: design-harvester
+  multi_instance: false
+  routes:
+    - /=http://web:3000
+services:
+  postgres:
+    image: embed:postgres
+    environment:
+      POSTGRES_DB: harvester
+      POSTGRES_USER: harvester
+      POSTGRES_PASSWORD: '{{ stable_secret "database" | sha256sum }}'
+    binds:
+      - /lzcapp/var/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U harvester -d harvester"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 512m
+  worker:
+    image: embed:worker
+    user: "1000:1000"
+    setup_script: |
+      mkdir -p /data/library /auth
+      chown -R 1000:1000 /data/library /auth
+      chmod 700 /auth
+    environment:
+      DATABASE_URL: 'postgres://harvester:{{ stable_secret "database" | sha256sum }}@postgres:5432/harvester'
+      BROWSER_WS: ws://browser:3001/harvester
+      DEEPSEEK_API_KEY_FILE: /auth/deepseek_api
+      MODEL_PROVIDER: antigravity-cli
+      LIBRARY_PATH: /data/library
+      GEMINI_AUTH_HOME: /auth
+      AGY_AUTH_HOME: /auth/antigravity
+      AGY_BIN: /usr/local/bin/agy
+      TMPDIR: /work
+    binds:
+      - /lzcapp/var/library:/data/library
+      - /lzcapp/var/auth:/auth
+    depends_on: [postgres, browser]
+    healthcheck:
+      test: [CMD, test, -f, /work/schema-ready]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+    tmpfs:
+      - /work:uid=1000,gid=1000,mode=0700,size=512m
+    mem_limit: 1536m
+  web:
+    image: embed:web
+    environment:
+      HOSTNAME: 0.0.0.0
+      DATABASE_URL: 'postgres://harvester:{{ stable_secret "database" | sha256sum }}@postgres:5432/harvester'
+      LIBRARY_PATH: /data/library
+      APP_ORIGIN: https://${LAZYCAT_APP_DOMAIN}
+    binds:
+      - /lzcapp/var/library:/data/library:ro
+    depends_on: [worker]
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+    mem_limit: 768m
+  browser:
+    image: embed:browser
+    depends_on: [egress]
+    healthcheck:
+      test: [CMD, node, -e, "const s=require('net').connect(3001,'127.0.0.1',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    shm_size: 512m
+    mem_limit: 1536m
+    tmpfs:
+      - /tmp:size=512m
+  egress:
+    image: embed:egress
+    healthcheck:
+      test: [CMD, node, -e, "const s=require('net').connect(3128,'127.0.0.1',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 256m

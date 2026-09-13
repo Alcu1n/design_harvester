@@ -1,0 +1,89 @@
+name: design-harvester
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: harvester
+      POSTGRES_USER: harvester
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes: [database:/var/lib/postgresql/data]
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U harvester"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  migrate:
+    build: { context: ., dockerfile: docker/Dockerfile, target: worker }
+    command: [pnpm, db:migrate]
+    environment:
+      DATABASE_URL: postgresql://harvester:${POSTGRES_PASSWORD}@postgres:5432/harvester
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [backend]
+  web:
+    build: { context: ., dockerfile: docker/Dockerfile, target: web }
+    ports: ["${BIND_ADDRESS:-127.0.0.1}:${PORT:-3000}:3000"]
+    environment:
+      HOSTNAME: 0.0.0.0
+      DATABASE_URL: postgresql://harvester:${POSTGRES_PASSWORD}@postgres:5432/harvester
+      LIBRARY_PATH: /data/library
+      GEMINI_AUTH_HOME: /auth
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:3000}
+    volumes: [library:/data/library:ro]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    networks: [backend, frontend]
+    restart: unless-stopped
+    mem_limit: 768m
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+  worker:
+    build: { context: ., dockerfile: docker/Dockerfile, target: worker }
+    environment:
+      DATABASE_URL: postgresql://harvester:${POSTGRES_PASSWORD}@postgres:5432/harvester
+      BROWSER_WS: ws://browser:3001/harvester
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_API_KEY_FILE: /auth/deepseek_api
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-antigravity-cli}
+      AGY_MODEL: ${AGY_MODEL:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-}
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
+      HTTPS_PROXY: ${GEMINI_HTTPS_PROXY:-}
+    volumes: [library:/data/library, auth:/auth]
+    tmpfs: ["/work:uid=1000,gid=1000,mode=0700,size=536870912"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      browser: { condition: service_started }
+    networks: [backend, capture, internet]
+    restart: unless-stopped
+    mem_limit: 1536m
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+  browser:
+    build: { context: ., dockerfile: docker/Dockerfile, target: browser }
+    networks: [capture]
+    depends_on: [egress]
+    shm_size: 512m
+    mem_limit: 1536m
+    tmpfs: ["/tmp:size=536870912"]
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+  egress:
+    build: { context: ., dockerfile: docker/Dockerfile, target: egress }
+    networks: [capture, internet]
+    restart: unless-stopped
+    mem_limit: 256m
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+networks:
+  frontend: {}
+  backend: { internal: true }
+  capture: { internal: true }
+  internet: {}
+volumes:
+  database: {}
+  library: {}
+  auth: {}

@@ -1,0 +1,42 @@
+# Run python3 scripts/build-lpk.py to prepare these local amd64 images.
+manifest: ./lzc-manifest.yml
+pkgout: ./release
+icon: ./lazycat/icon.png
+images:
+  web:
+    builder: local
+    context: ./lazycat/embed/web
+    dockerfile-content: |
+      FROM harvester-lpk-stage-web:latest
+    upstream-match: registry.lazycat.cloud
+  worker:
+    builder: local
+    context: ./lazycat/embed/worker
+    dockerfile-content: |
+      FROM harvester-lpk-stage-worker:latest
+    upstream-match: registry.lazycat.cloud
+  browser:
+    builder: local
+    context: ./lazycat/embed/browser
+    dockerfile-content: |
+      FROM harvester-lpk-stage-browser:latest
+    upstream-match: registry.lazycat.cloud
+  egress:
+    builder: local
+    context: ./lazycat/embed/egress
+    dockerfile-content: |
+      FROM harvester-lpk-stage-egress:latest
+    upstream-match: registry.lazycat.cloud
+  postgres:
+    builder: local
+    context: ./lazycat/postgres
+    dockerfile-content: |
+      FROM postgres:17-alpine
+    upstream-match: registry.lazycat.cloud
+# Intermediate packages cannot run before the mandatory isolation finalizer.
+compose_override:
+  services:
+    browser:
+      entrypoint: [/bin/false]
+    worker:
+      entrypoint: [/bin/false]

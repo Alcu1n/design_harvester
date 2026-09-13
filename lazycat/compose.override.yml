@@ -1,0 +1,41 @@
+# !override is essential: appending the default network breaks browser isolation.
+# Requires Docker Compose >= 2.24.4. Unsupported engines must reject this file.
+services:
+  postgres:
+    networks: !override [harvester_backend]
+    volumes:
+      - type: tmpfs
+        target: /lzcapp/var
+  web:
+    networks: !override [default, harvester_backend]
+    volumes:
+      - type: tmpfs
+        target: /lzcapp/var
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  worker:
+    networks: !override [harvester_backend, harvester_capture, harvester_internet]
+    volumes:
+      - type: tmpfs
+        target: /lzcapp/var
+    security_opt: [no-new-privileges:true]
+  browser:
+    entrypoint: [node, /browser/browser.mjs]
+    command: !override []
+    networks: !override [harvester_capture]
+    volumes: !override []
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  egress:
+    entrypoint: [pnpm, --filter, "@harvester/core", exec, tsx, src/proxy.ts]
+    command: !override []
+    networks: !override [harvester_capture, harvester_internet]
+    volumes: !override []
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+networks:
+  harvester_backend:
+    internal: true
+  harvester_capture:
+    internal: true
+  harvester_internet: {}

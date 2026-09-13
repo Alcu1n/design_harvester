@@ -1,0 +1,14 @@
+package: local.alcuin.design-harvester
+version: 0.1.0
+name: Design Harvester
+description: 私有网页设计方案库，采集截图并生成 DESIGN.md 与 iOS 设计规范。
+author: alcuin
+admin_only: true
+min_os_version: 1.6.0
+unsupported_platforms:
+  - linux/arm64
+  - linux/386
+permissions:
+  required:
+    - net.internet
+    - compose.override
