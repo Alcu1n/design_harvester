@@ -18,6 +18,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { api, labels } from "./library";
 import { Button } from "./button";
 import { DownloadButton } from "./download-button";
+import { presentation } from "./presentation";
 import { InspectorScroll } from "./inspector-scroll";
 const stages: Record<string, string> = {
   QUEUED: "等待开始",
@@ -28,6 +29,12 @@ const stages: Record<string, string> = {
   GENERATING_DESIGN_MD: "生成 DESIGN.md",
   ADAPTING_IOS: "适配 iOS",
   QUALITY_REVIEW: "质量检查",
+  VALIDATING_ENGLISH: "正在校验英文文档",
+  TRANSLATING_DESIGN_DNA: "正在翻译中文介绍",
+  VALIDATING_TRANSLATION: "正在校验中文介绍",
+  REPAIRING_CONTENT: "正在自动修复",
+  CONTENT_CHECK_FAILED: "内容检查未通过",
+  MANUAL_STATUS_CHANGED: "手动修改状态",
   SAVING_ARTIFACTS: "保存资产",
   PUBLISHING: "发布版本",
   COMPLETE: "处理完成",
@@ -76,7 +83,12 @@ function Document({ url, name }: { url: string; name: string }) {
             {copied ? <Check size={15} /> : <Copy size={15} />}{" "}
             {copied ? "已复制" : "复制"}
           </Button>
-          <DownloadButton key={url} url={url + "?download"} filename={name} disabled={!text}>
+          <DownloadButton
+            key={url}
+            url={url + "?download"}
+            filename={name}
+            disabled={!text}
+          >
             下载
           </DownloadButton>
         </div>
@@ -151,7 +163,7 @@ export function Detail({ id }: { id: string }) {
   );
   const base = `/api/assets/${id}/versions/${version?.id}/`,
     snap = `/api/assets/${id}/snapshots/${version?.snapshot_id}/`;
-  const analysis = version?.analysis;
+  const analysis = presentation(version);
   useEffect(() => {
     if (!version) return;
     let alive = true;
@@ -253,10 +265,17 @@ export function Detail({ id }: { id: string }) {
         <div className="progress-panel" role="status">
           <div>
             <strong>
-              {labels[task.status]} · {stages[task.stage] || task.stage}
+              {labels[task.status]} ·{" "}
+              {task.manual_status
+                ? "手动标记"
+                : task.error?.code === "CONTENT_REPAIR_SCHEDULED"
+                  ? `正在自动修复 · ${task.repair_state?.repairs || 0}/5`
+                  : stages[task.stage] || task.stage}
             </strong>
             <p>
-              {task.error?.message ||
+              {(task.manual_status
+                ? "原始校验结论与已保存文件保持不变。"
+                : task.error?.message) ||
                 (task.status === "PARTIAL"
                   ? "结果已保留，但未达到完整合格标准。"
                   : "截图和证据会分阶段保存，你可以离开此页面。")}
@@ -296,25 +315,69 @@ export function Detail({ id }: { id: string }) {
           </div>
         </div>
       )}
+      {task && (
+        <div className="task-status-control">
+          <label>
+            手动修改任务状态
+            <select
+              aria-label="手动修改任务状态"
+              value=""
+              disabled={busy}
+              onChange={async (e) => {
+                const status = e.target.value;
+                if (!status) return;
+                setBusy(true);
+                try {
+                  await api("harvest-runs/" + task.id + "/status", "POST", {
+                    status,
+                  });
+                  await load();
+                } catch (e: any) {
+                  setError(e.message);
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              <option value="">选择状态</option>
+              <option value="READY">已完成</option>
+              <option value="FAILED">失败</option>
+            </select>
+          </label>
+          <p className="muted">
+            手动标记会停止当前任务，保留已保存文件与校验结论。
+          </p>
+          {task.manual_status && (
+            <p role="status">
+              已手动标记为{labels[task.manual_status.status]}
+              ；此标记不代表文档通过校验。
+            </p>
+          )}
+        </div>
+      )}
       {version && (
         <>
           <div className="detail-layout">
-              <div className="tabs screenshot-tabs" role="tablist" aria-label="截图尺寸">
-                {[
-                  ["desktop", "桌面"],
-                  ["tablet", "平板"],
-                  ["mobile", "手机"],
-                ].map(([v, l]) => (
-                  <button
-                    role="tab"
-                    aria-selected={viewport === v}
-                    key={v}
-                    onClick={() => setViewport(v)}
-                  >
-                    {l}
-                  </button>
-                ))}
-              </div>
+            <div
+              className="tabs screenshot-tabs"
+              role="tablist"
+              aria-label="截图尺寸"
+            >
+              {[
+                ["desktop", "桌面"],
+                ["tablet", "平板"],
+                ["mobile", "手机"],
+              ].map(([v, l]) => (
+                <button
+                  role="tab"
+                  aria-selected={viewport === v}
+                  key={v}
+                  onClick={() => setViewport(v)}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
             <section className="visual-section">
               <Dialog.Root>
                 <Dialog.Trigger asChild>
@@ -437,6 +500,25 @@ export function Detail({ id }: { id: string }) {
               </div>
             </InspectorScroll>
           </div>
+          {version.validation && !version.validation.valid && (
+            <div className="notice" role="status">
+              <p>已生成，未通过规范或语言校验。当前文件为待修复候选。</p>
+              {version.validation.issues?.map((issue: any, i: number) => (
+                <p key={i}>
+                  {issue.path}：{issue.message}
+                </p>
+              ))}
+              {version.validation.report && (
+                <DownloadButton
+                  variant="ghost"
+                  url={`/api/assets/${version.validation.report}?download`}
+                  filename="validation-report.json"
+                >
+                  下载检查报告
+                </DownloadButton>
+              )}
+            </div>
+          )}
           <div className="document-tabs tabs">
             {["DESIGN.md", "IOS_design.md"].map((n) => (
               <button
@@ -449,7 +531,14 @@ export function Detail({ id }: { id: string }) {
             ))}
           </div>
           <Document
-            key={base + doc + (task?.stage || "")}
+            key={
+              base +
+              doc +
+              (selectedTask?.stage || "") +
+              (selectedTask?.repair_state?.outputs?.[
+                doc === "DESIGN.md" ? "analysis" : "ios"
+              ] || "")
+            }
             url={base + doc}
             name={doc}
           />
@@ -622,9 +711,30 @@ export function Detail({ id }: { id: string }) {
               </table>
             </div>
             <div className="actions">
-              <DownloadButton key={snap + "evidence.json"} variant="ghost" url={snap + "evidence.json?download"} filename="evidence.json">下载 evidence.json</DownloadButton>
-              <DownloadButton key={base + "critic.json"} variant="ghost" url={base + "critic.json?download"} filename="critic.json">下载质检记录</DownloadButton>
-              <DownloadButton key={base + "manifest.json"} variant="ghost" url={base + "manifest.json?download"} filename="manifest.json">下载版本清单</DownloadButton>
+              <DownloadButton
+                key={snap + "evidence.json"}
+                variant="ghost"
+                url={snap + "evidence.json?download"}
+                filename="evidence.json"
+              >
+                下载 evidence.json
+              </DownloadButton>
+              <DownloadButton
+                key={base + "critic.json"}
+                variant="ghost"
+                url={base + "critic.json?download"}
+                filename="critic.json"
+              >
+                下载质检记录
+              </DownloadButton>
+              <DownloadButton
+                key={base + "manifest.json"}
+                variant="ghost"
+                url={base + "manifest.json?download"}
+                filename="manifest.json"
+              >
+                下载版本清单
+              </DownloadButton>
             </div>
           </>
         ) : (
@@ -643,6 +753,32 @@ export function Detail({ id }: { id: string }) {
               <p key={i}>
                 <time>{new Date(e.time).toLocaleTimeString("zh-CN")}</time>{" "}
                 {stages[e.stage] || e.stage}
+                {e.stage === "MANUAL_STATUS_CHANGED"
+                  ? ` · ${labels[e.status]}（原状态：${labels[e.previousStatus]}）`
+                  : ""}
+                {e.attempt ? ` · ${e.attempt}/5` : ""}
+                {e.retryAt && (
+                  <span>
+                    {" "}
+                    · 计划重试：
+                    {new Date(e.retryAt).toLocaleTimeString("zh-CN")}
+                  </span>
+                )}
+                {e.issues?.map((issue: any, n: number) => (
+                  <span className="task-issue" key={n}>
+                    {issue.path}：{issue.message}
+                  </span>
+                ))}
+                {e.report && (
+                  <a
+                    href={`/api/assets/${e.report}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {" "}
+                    查看检查报告
+                  </a>
+                )}
               </p>
             ))}
           </div>

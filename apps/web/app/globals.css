@@ -1017,3 +1017,10 @@ dd {
 .model-settings-form label { font-size: 14px; color: var(--muted); }
 .model-settings-form input { width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: inherit; }
 .model-settings-form > div { margin-top: 8px; }
+
+.task-issue { display: block; overflow-wrap: anywhere; }
+
+.task-status-control { margin: 20px 0 32px; }
+.task-status-control label { display: flex; align-items: center; gap: 16px; font-size: 14px; }
+.task-status-control select { min-width: 128px; }
+.task-status-control p { margin: 8px 0 0; font-size: 13px; }

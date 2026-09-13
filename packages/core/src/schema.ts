@@ -37,6 +37,8 @@ export const versions = pgTable("versions", {
   score: integer(),
   quality: text().default("PENDING").notNull(),
   metadata: jsonb().notNull(),
+  displayZh: jsonb("display_zh"),
+  validation: jsonb(),
   createdAt: timestamp("created_at", { withTimezone: true })
     .defaultNow()
     .notNull(),
@@ -52,6 +54,9 @@ export const tasks = pgTable("tasks", {
   status: text().notNull().default("QUEUED"),
   stage: text().notNull().default("QUEUED"),
   error: jsonb(),
+  repairState: jsonb("repair_state"),
+  manualStatus: jsonb("manual_status"),
+  controlRevision: integer("control_revision").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true })
     .defaultNow()
     .notNull(),

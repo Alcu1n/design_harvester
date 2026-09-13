@@ -1,30 +1,13 @@
+import { generateDocuments } from "./generation.ts";
 import { modelProvider } from "./provider.ts";
 import { clearTiles } from "./storage.ts";
 import { pool, sql } from "./db.ts";
 import { capture, visualInputs } from "./browser.ts";
 import { type DesignModelProvider } from "./model.ts";
-import {
-  AnalysisSchema,
-  IOSSchema,
-  CriticSchema,
-  eligible,
-  HarvestError,
-  type Evidence,
-  type Critic,
-  type Analysis,
-  type IOSAnalysis,
-} from "./contracts.ts";
-import { getJSON, putJSON, put, exists, manifest, files } from "./storage.ts";
-import {
-  renderDesign,
-  renderIOS,
-  lintDesign,
-  validateAnalysis,
-} from "./render.ts";
-export async function processTask(
-  id: string,
-  provider?: DesignModelProvider,
-) {
+import { eligible, HarvestError, type Evidence } from "./contracts.ts";
+import { getJSON, putJSON, put, exists, manifest } from "./storage.ts";
+import { renderDesign, renderIOS } from "./render.ts";
+export async function processTask(id: string, provider?: DesignModelProvider) {
   const connection = await pool.connect();
   let timer: ReturnType<typeof setInterval> | undefined;
   const controller = new AbortController();
@@ -43,17 +26,19 @@ export async function processTask(
     if (
       !task ||
       !["QUEUED", "RUNNING"].includes(task.status) ||
+      (task.retry_at && new Date(task.retry_at).getTime() > Date.now()) ||
       task.cancel_requested
     )
       return;
-    await sql(
-      "UPDATE tasks SET status='RUNNING',heartbeat_at=now() WHERE id=$1",
-      [id],
+    const started = await sql(
+      "UPDATE tasks SET status='RUNNING',error=NULL,retry_at=NULL,heartbeat_at=now() WHERE id=$1 AND control_revision=$2 AND manual_status IS NULL AND cancel_requested=false RETURNING id",
+      [id, task.control_revision],
     );
+    if (!started.length) return;
     timer = setInterval(() => {
       void sql(
-        "UPDATE tasks SET heartbeat_at=now() WHERE id=$1 RETURNING cancel_requested",
-        [id],
+        "UPDATE tasks SET heartbeat_at=now() WHERE id=$1 AND control_revision=$2 RETURNING cancel_requested",
+        [id, task.control_revision],
       )
         .then((r) => {
           if (!r.length || r[0].cancel_requested) controller.abort();
@@ -64,8 +49,13 @@ export async function processTask(
       if (controller.signal.aborted)
         throw new HarvestError("CANCELED", "任务已取消。");
       const [state] = await sql(
-        "UPDATE tasks SET stage=$2,events=events||$3::jsonb WHERE id=$1 RETURNING cancel_requested",
-        [id, s, JSON.stringify([{ stage: s, time: new Date().toISOString() }])],
+        "UPDATE tasks SET stage=$2,events=events||$3::jsonb WHERE id=$1 AND control_revision=$4 RETURNING cancel_requested",
+        [
+          id,
+          s,
+          JSON.stringify([{ stage: s, time: new Date().toISOString() }]),
+          task.control_revision,
+        ],
       );
       if (!state || state.cancel_requested)
         throw new HarvestError("CANCELED", "任务已取消。");
@@ -73,7 +63,10 @@ export async function processTask(
     const snapshot = `${task.design_id}/snapshots/${task.snapshot_id}`,
       version = `${task.design_id}/versions/${task.version_id}`;
     try {
-      const [generation] = await sql("SELECT metadata FROM versions WHERE id=$1", [task.version_id]);
+      const [generation] = await sql(
+        "SELECT metadata FROM versions WHERE id=$1",
+        [task.version_id],
+      );
       const activeProvider = provider ?? modelProvider(generation?.metadata);
       let evidence: Evidence;
       if (await exists(snapshot + "/evidence.json"))
@@ -94,76 +87,19 @@ export async function processTask(
       }
       await manifest(snapshot, { snapshotId: task.snapshot_id });
       const images = await visualInputs(snapshot);
-      const cache = async <T>(
-        name: string,
-        fn: () => Promise<T>,
-      ): Promise<T> => {
-        if (await exists(version + "/" + name))
-          return getJSON<T>(version + "/" + name);
-        const value = await fn();
-        await putJSON(version + "/" + name, value);
-        return value;
-      };
-      let critic: Critic | undefined;
-      let lint: ReturnType<typeof lintDesign> | undefined;
-      let analysis: Analysis | undefined;
-      let ios: IOSAnalysis | undefined;
-      for (let revision = 0; revision < 2; revision++) {
-        const folder = revision ? "revision-1/" : "revision-0/";
-        await stage("ANALYZING_DESIGN");
-        analysis = await cache(folder + "analysis.json", () =>
-          activeProvider.generate(
-            AnalysisSchema,
-            "从浏览器证据和截图抽象设计语言，所有 signatureTraits 引用真实 element id。不要发明字体或数值；至少三条特征、三条 Do 和三条 Don’t。响应式仅描述三个实测视口之间的差异。",
-            { evidence, revisionIssues: critic?.issues },
-            images,
-            controller.signal,
-          ),
-        );
-        if (!validateAnalysis(evidence, analysis))
-          throw new HarvestError(
-            "MODEL_SCHEMA_INVALID",
-            "分析引用了不存在的浏览器证据。",
-          );
-        await stage("GENERATING_DESIGN_MD");
-        const markdown = renderDesign(evidence, analysis);
-        lint = lintDesign(markdown);
-        await put(version + "/" + folder + "DESIGN.md", markdown);
-        await putJSON(version + "/" + folder + "lint.json", lint);
-        await put(version + "/DESIGN.md", markdown);
-        await putJSON(version + "/analysis.json", analysis);
-        await sql("UPDATE versions SET analysis=$2 WHERE id=$1", [
-          task.version_id,
-          JSON.stringify(analysis),
-        ]);
-        if (!lint.valid)
-          throw new HarvestError(
-            "DESIGN_MD_INVALID",
-            "设计文档未通过官方规范校验，原始证据已保留。",
-          );
-        await stage("ADAPTING_IOS");
-        ios = await cache(folder + "ios-analysis.json", () =>
-          activeProvider.generate(
-            IOSSchema,
-            "将设计意图适配到 iOS 17+ 的 SwiftUI 原生语言。覆盖全部章节。Dynamic Type、Safe Area、系统 Material、SF Symbols、无障碍和 Reduce Motion。Haptics 与暗色方案明确标注为建议，不是观察事实。未实测的对比度不得给出数值；颜色只能引用证据中的确定值，其余明确标为适配建议；链接用传入 URL 参数不硬编码证据外地址。示例标注 API 系统版本；禁止 CSS blur 机械映射为 SwiftUI blur。",
-            { analysis, evidence, revisionIssues: critic?.issues },
-            [],
-            controller.signal,
-          ),
-        );
-        await put(version + "/" + folder + "IOS_design.md", renderIOS(ios));
-        await stage("QUALITY_REVIEW");
-        critic = await cache(folder + "critic.json", () =>
-          activeProvider.generate(
-            CriticSchema,
-            "独立审核字体和颜色是否忠于证据、至少三条独特设计特征、响应式描述、iOS 原生适配。字体 CSS 声明与实际渲染字体应区分，不能声称知道未观察交互。Web token 是代码保存的桌面视口实测值，保留小数或视口相关值本身不是错误，不得要求模型修改这些观察值。检查相对布局是否在正文说明。iOS 新数值若明确标为适配建议则不是观察事实。发现伪装为实测的臆造数值或 iOS 机械 CSS 翻译时 severity=error。",
-            { evidence, analysis, ios, design: markdown, lint },
-            images,
-            controller.signal,
-          ),
-        );
-        if (critic.score < 70 || critic.score >= 85 || revision === 1) break;
-      }
+      const { analysis, ios, critic, lint, displayZh, validation } =
+        await generateDocuments({
+          taskId: id,
+          versionId: task.version_id,
+          prefix: version,
+          evidence,
+          provider: activeProvider,
+          images,
+          signal: controller.signal,
+          state: task.repair_state,
+          controlRevision: task.control_revision,
+          stage,
+        });
       await stage("SAVING_ARTIFACTS");
       await putJSON(version + "/analysis.json", analysis);
       await sql("UPDATE versions SET analysis=$2 WHERE id=$1", [
@@ -182,21 +118,41 @@ export async function processTask(
       await manifest(version, {
         ...meta?.metadata,
         snapshotId: task.snapshot_id,
+        language: "en",
+        presentationLanguage: "zh-CN",
+        validation,
         quality,
       });
       await stage("PUBLISHING");
       await connection.query("BEGIN");
       const current = (
         await connection.query(
-          "SELECT cancel_requested FROM tasks WHERE id=$1 FOR UPDATE",
+          "SELECT cancel_requested,control_revision FROM tasks WHERE id=$1 FOR UPDATE",
           [id],
         )
       ).rows[0];
-      if (!current || current.cancel_requested)
+      if (
+        !current ||
+        current.cancel_requested ||
+        current.control_revision !== task.control_revision
+      )
         throw new HarvestError("CANCELED", "任务已取消。");
       await connection.query(
-        "UPDATE versions SET score=$2,quality=$3,analysis=$4 WHERE id=$1",
-        [task.version_id, critic!.score, quality, JSON.stringify(analysis)],
+        "UPDATE versions SET score=$2,quality=$3,analysis=$4,display_zh=$5,validation=$6,metadata=metadata||$7::jsonb WHERE id=$1",
+        [
+          task.version_id,
+          critic!.score,
+          quality,
+          JSON.stringify(analysis),
+          JSON.stringify(displayZh),
+          JSON.stringify(validation),
+          JSON.stringify({
+            language: "en",
+            presentationLanguage: "zh-CN",
+            pipeline: "1.1.0",
+            prompt: "2.0",
+          }),
+        ],
       );
       if (ready)
         await connection.query(
@@ -227,6 +183,7 @@ export async function processTask(
               : e.code === "QUOTA_EXHAUSTED"
                 ? "WAITING_QUOTA"
                 : "FAILED";
+      const repairScheduled = e.code === "CONTENT_REPAIR_SCHEDULED";
       const transient =
         [
           "MODEL_TIMEOUT",
@@ -235,14 +192,16 @@ export async function processTask(
           "PIPELINE_FAILED",
         ].includes(e.code) && task.attempts < 2;
       await sql(
-        "UPDATE tasks SET status=$2,error=$3,retry_at=$4,attempts=attempts+1,dispatched_at=NULL,finished_at=now() WHERE id=$1",
+        "UPDATE tasks SET status=$2,error=$3,retry_at=$4,attempts=attempts+CASE WHEN $5 THEN 0 ELSE 1 END,dispatched_at=NULL,finished_at=CASE WHEN $2='QUEUED' THEN NULL ELSE now() END WHERE id=$1 AND control_revision=$6 AND manual_status IS NULL",
         [
           id,
-          transient ? "QUEUED" : status,
+          transient || repairScheduled ? "QUEUED" : status,
           JSON.stringify({ code: e.code, message: e.message }),
           transient
             ? new Date(Date.now() + 30000 * 2 ** task.attempts)
             : e.retryAt || null,
+          repairScheduled,
+          task.control_revision,
         ],
       );
     } finally {

@@ -61,6 +61,7 @@ const trait = z.object({
 });
 export const AnalysisSchema = z.object({
   name: z.string().min(1).max(120),
+  evidenceWarnings: z.array(prose).default([]),
   summary: prose,
   tags: z.array(z.string().max(40)).min(1).max(8),
   philosophy: prose,

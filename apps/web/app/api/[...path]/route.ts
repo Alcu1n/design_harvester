@@ -13,6 +13,7 @@ import {
   cancel,
   deleteDesign,
   updateDesign,
+  setTaskStatus,
 } from "@harvester/core/service";
 import { sql } from "@harvester/core/db";
 import { sameOrigin } from "@harvester/core/security";
@@ -152,6 +153,12 @@ async function handler(
       if (!t) throw new HarvestError("NOT_FOUND", "任务不存在。");
       if (p.length === 2 && method === "GET") return json(t);
       if (method === "POST") {
+        if (p[2] === "status") {
+          const body = await req.json();
+          if (!["READY","FAILED"].includes(body?.status)) throw new HarvestError("CONFLICT","请选择已完成或失败。");
+          await setTaskStatus(t.id,body.status);
+          return json({ok:true});
+        }
         if (p[2] === "resume") {
           await resume(t.id);
           return json({ ok: true }, 202);

@@ -1,4 +1,5 @@
 "use client";
+import { presentation } from "./presentation";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -201,7 +202,7 @@ export function Library() {
                   {d.snapshot_id ? (
                     <img
                       src={`/api/assets/${d.id}/snapshots/${d.snapshot_id}/screenshots/desktop.webp`}
-                      alt={d.title || d.analysis?.name || "网站预览"}
+                      alt={d.title || presentation(d)?.name || "网站预览"}
                       onError={(e) => {
                         e.currentTarget.style.display = "none";
                       }}
@@ -210,7 +211,7 @@ export function Library() {
                     <Layers size={32} />
                   )}
                   <span className="card-status">
-                    {labels[d.status] || "待采集"}
+                    {labels[d.status] || "待采集"}{d.manual_status ? "（手动）" : ""}
                   </span>
                   <span className="card-open">
                     <ArrowUpRight size={18} />
@@ -219,12 +220,12 @@ export function Library() {
                 <div className="card-meta">
                   <h3>
                     {d.title ||
-                      d.analysis?.name ||
+                      presentation(d)?.name ||
                       new URL(d.canonical_url).hostname}
                   </h3>
                   <span>{new URL(d.canonical_url).hostname}</span>
                   <p>
-                    {d.analysis?.summary ||
+                    {presentation(d)?.summary ||
                       ([
                         "WAITING_AUTH",
                         "WAITING_QUOTA",
@@ -237,7 +238,7 @@ export function Library() {
                     {[
                       ...new Set([
                         ...(d.tags || []),
-                        ...(d.analysis?.tags || []),
+                        ...(presentation(d)?.tags || []),
                       ]),
                     ]
                       .slice(0, 4)

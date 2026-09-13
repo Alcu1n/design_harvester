@@ -1,4 +1,8 @@
-import { providerInfo, modelMetadata, type ModelConfig } from "./model-config.ts";
+import {
+  providerInfo,
+  modelMetadata,
+  type ModelConfig,
+} from "./model-config.ts";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { designs } from "./schema.ts";
@@ -8,16 +12,17 @@ import { HarvestError } from "./contracts.ts";
 import { files, getJSON, get, removeDesign, manifest } from "./storage.ts";
 import { getModelConfig } from "./model-settings.ts";
 export const versionsMetadata = (config: ModelConfig = providerInfo()) => ({
-  pipeline: "1.0.0",
-  extractor: "1.0.1",
+  pipeline: "1.1.0",
+  extractor: "1.0.2",
   evidenceSchema: "1.0",
   analysis: "1.0",
   iosAdapter: "1.0",
-  prompt: "1.0",
+  prompt: "2.0",
   designMdSpec: "alpha",
   designMdLinter: "0.4.0",
   ...modelMetadata(config),
-  language: "zh-CN",
+  language: "en",
+  presentationLanguage: "zh-CN",
 });
 export async function createRun(
   url: string,
@@ -82,10 +87,10 @@ export async function listDesigns(search: URLSearchParams) {
       : sort === "score"
         ? "v.score DESC NULLS LAST,d.created_at DESC"
         : "d.created_at DESC";
-  const filter = `WHERE NOT EXISTS(SELECT 1 FROM deletion_queue q WHERE q.design_id=d.id) AND ($1='' OR concat_ws(' ',d.title,d.canonical_url,d.tags::text,v.analysis->>'name',v.analysis->>'summary') ILIKE '%'||$1||'%') AND ($2='' OR d.tags ? $2 OR (v.analysis->'tags') ? $2) AND ($3='' OR t.status=$3)`;
+  const filter = `WHERE NOT EXISTS(SELECT 1 FROM deletion_queue q WHERE q.design_id=d.id) AND ($1='' OR concat_ws(' ',d.title,d.canonical_url,d.tags::text,v.analysis->>'name',v.analysis->>'summary',v.display_zh->>'name',v.display_zh->>'summary') ILIKE '%'||$1||'%') AND ($2='' OR d.tags ? $2 OR (v.analysis->'tags') ? $2 OR (v.display_zh->'tags') ? $2) AND ($3='' OR t.status=$3)`;
   const from = `FROM designs d LEFT JOIN LATERAL (SELECT * FROM versions WHERE design_id=d.id ORDER BY (id=d.default_version_id) DESC NULLS LAST,created_at DESC LIMIT 1) v ON true LEFT JOIN LATERAL(SELECT * FROM tasks WHERE design_id=d.id ORDER BY created_at DESC LIMIT 1)t ON true`;
   const items = await sql(
-    `SELECT d.*,v.id AS version_id,v.snapshot_id,v.score,v.quality,v.analysis,t.status,t.stage ${from} ${filter} ORDER BY ${order} LIMIT 24 OFFSET $4`,
+    `SELECT d.*,v.id AS version_id,v.snapshot_id,v.score,v.quality,v.analysis,v.display_zh,v.metadata,v.validation,t.status,t.stage,t.manual_status ${from} ${filter} ORDER BY ${order} LIMIT 24 OFFSET $4`,
     [query, tag, status, (page - 1) * 24],
   );
   const [count] = await sql(`SELECT count(*)::int AS total ${from} ${filter}`, [
@@ -120,9 +125,29 @@ export async function detail(id: string) {
   const assets = await files(id);
   return { ...d, versions, tasks, assets };
 }
-export async function resume(id: string) {
+export async function setTaskStatus(id: string, status: "READY" | "FAILED") {
+  if (!["READY", "FAILED"].includes(status))
+    throw new HarvestError("CONFLICT", "请选择已完成或失败。");
   const rows = await sql(
-    "UPDATE tasks SET status='QUEUED',error=NULL,retry_at=NULL,attempts=0,dispatched_at=NULL,cancel_requested=false WHERE id=$1 AND status IN ('FAILED','PARTIAL','WAITING_AUTH','WAITING_QUOTA','WAITING_CONFIG','CANCELED') RETURNING id",
+    `UPDATE tasks SET manual_status=jsonb_build_object('status',$2::text,'previousStatus',status,'time',now()),status=$2,cancel_requested=true,control_revision=control_revision+1,finished_at=now(),retry_at=NULL,dispatched_at=NULL,events=events||jsonb_build_array(jsonb_build_object('stage','MANUAL_STATUS_CHANGED','status',$2::text,'previousStatus',status,'time',now())) WHERE id=$1 RETURNING id`,
+    [id, status],
+  );
+  if (!rows.length) throw new HarvestError("NOT_FOUND", "任务不存在。");
+}
+export async function resume(id: string) {
+  const [protectedVersion] = await sql(
+    "SELECT t.manual_status,t.design_id,t.snapshot_id,d.canonical_url FROM tasks t JOIN versions v ON v.id=t.version_id JOIN designs d ON d.id=t.design_id WHERE t.id=$1 AND v.quality='QUALIFIED'",
+    [id],
+  );
+  if (protectedVersion?.manual_status)
+    return createRun(
+      protectedVersion.canonical_url,
+      protectedVersion.design_id,
+      protectedVersion.snapshot_id,
+    );
+
+  const rows = await sql(
+    `UPDATE tasks SET status='QUEUED',manual_status=NULL,control_revision=control_revision+1,error=NULL,retry_at=NULL,attempts=0,finished_at=NULL,repair_state=CASE WHEN status IN ('FAILED','PARTIAL','CANCELED') AND repair_state IS NOT NULL THEN repair_state || '{"repairs":0,"fingerprints":{}}'::jsonb ELSE repair_state END,dispatched_at=NULL,cancel_requested=false WHERE id=$1 AND status IN ('FAILED','PARTIAL','WAITING_AUTH','WAITING_QUOTA','WAITING_CONFIG','CANCELED') RETURNING id`,
     [id],
   );
   if (!rows.length) throw new HarvestError("CONFLICT", "当前任务无法恢复。");

@@ -61,27 +61,42 @@ export const evidence: Evidence = {
   warnings: [],
 };
 export const analysis = AnalysisSchema.parse({
-  name: "安静的编辑设计",
-  summary: "用衬线标题和留白表达内容层次。",
+  name: "Quiet editorial design",
+  summary:
+    "Serif headings and generous space establish a clear reading hierarchy.",
   tags: ["Editorial"],
-  philosophy: "将阅读内容放在首位。",
-  colorStrategy: "克制的中性色形成对比。",
-  typographyStrategy: "Georgia 衬线字体负责标题。",
-  layoutStrategy: "内容从左侧顺序展开。",
-  spacingStrategy: "采用浏览器提取的间距。",
-  surfaceStrategy: "平面表面减少视觉噪声。",
-  shapeStrategy: "少量圆角用于柔化容器。",
-  componentStrategy: "标题和段落构成阅读结构。",
-  motionStrategy: "没有观察到动态效果。",
-  responsiveStrategy: "现有证据只有桌面视口，不能推断移动端。",
+  philosophy: "Keep the reading experience at the center of the design.",
+  colorStrategy: "Restrained neutral colors provide contrast.",
+  typographyStrategy: "Georgia is the declared heading font.",
+  layoutStrategy: "Content follows a left-aligned reading order.",
+  spacingStrategy: "Use the spacing measured in the browser.",
+  surfaceStrategy: "Flat surfaces minimize visual noise.",
+  shapeStrategy: "Subtle rounding softens the containers.",
+  componentStrategy: "Headings and paragraphs form the reading structure.",
+  motionStrategy: "No motion was observed.",
+  responsiveStrategy:
+    "Only desktop evidence is available; mobile behavior cannot be inferred.",
   signatureTraits: [1, 2, 3].map((i) => ({
-    description: "以可观察的排版特征组织设计 " + i,
+    description: "Observed typography establishes the design hierarchy " + i,
     evidenceIds: ["desktop-0"],
   })),
-  do: ["使用实测字体声明。", "保持阅读层级清晰。", "保留大面积留白。"],
+  do: [
+    "Use the observed font declarations.",
+    "Maintain a clear reading hierarchy.",
+    "Preserve generous whitespace.",
+  ],
   dont: [
-    "不要添加无依据的颜色。",
-    "不要堆叠装饰性阴影。",
-    "不要推断未知交互。",
+    "Do not invent colors.",
+    "Avoid unsupported decorative shadows.",
+    "Do not assume unobserved interactions.",
   ],
 });
+export const displayZh = {
+  name: "安静的编辑设计",
+  summary: "衬线标题和充足留白构成清晰的阅读层次。",
+  tags: ["编辑设计"],
+  signatureTraits: analysis.signatureTraits.map((t, i) => ({
+    description: "实测排版建立设计层级 " + (i + 1),
+    evidenceIds: t.evidenceIds,
+  })),
+};
