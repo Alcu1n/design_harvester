@@ -1,16 +1,35 @@
 # !override is essential: appending the default network breaks browser isolation.
 # Requires Docker Compose >= 2.24.4. Unsupported engines must reject this file.
 services:
+  app:
+    depends_on:
+      web:
+        condition: service_healthy
+        required: true
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://web:3000/api/settings]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
   postgres:
     networks: !override [harvester_backend]
     volumes:
       - type: tmpfs
         target: /lzcapp/var
   web:
+    depends_on:
+      worker:
+        condition: service_healthy
+        required: true
     networks: !override [default, harvester_backend]
     volumes:
       - type: tmpfs
         target: /lzcapp/var
+      - type: bind
+        source: /lzcsys/data/appvar/local.alcuin.design-harvester/library
+        target: /data/library
+        read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
   worker:
@@ -27,7 +46,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
   egress:
-    entrypoint: [pnpm, --filter, "@harvester/core", exec, tsx, src/proxy.ts]
+    entrypoint: [node, --import, tsx, /app/src/proxy.ts]
     command: !override []
     networks: !override [harvester_capture, harvester_internet]
     volumes: !override []

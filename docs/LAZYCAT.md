@@ -5,9 +5,9 @@
 ## 安装
 
 1. 系统需为 LZCOS 1.6.0 或更新版本，运行环境需支持 Docker Compose 2.24.4+ 的 `!override` 标签。预留约 6 GB 内存预算和至少 10 GB 安装空间，收藏截图另计。
-2. 在懒猫客户端选择本地安装 `release/design-harvester-0.1.0-amd64.lpk`。安装包声明联网与 Compose override 权限，入口由懒猫身份网关保护，仅管理员可见。
+2. 在懒猫客户端选择本地安装 `release/design-harvester-0.1.3-amd64.lpk`。安装包声明联网与 Compose override 权限，入口由懒猫身份网关保护，仅管理员可见。
 3. 首次启动自动创建数据库结构。界面可以打开后，在设置页查看认证状态；未认证时任务会暂停。
-4. 在开发者工具的 **worker 容器**终端中执行：
+4. 使用 DeepSeek 时，在「设置 → AI 连接」选择 DeepSeek，填写 API 密钥并保存，默认模型 `deepseek-flash`。密钥存于设备数据库，备份数据库时也应保护其中的凭证。使用 Gemini 时，在开发者工具的 **worker 容器**终端中执行：
 
    ```sh
    cd /app
@@ -78,3 +78,32 @@ LPK 的 browser 镜像采用 Playwright 1.58.2 的 Chromium headless shell（Deb
 最终包验证补充：五个 amd64 镜像均健康启动；精简后的 **amd64 Chromium** 在独立隔离环境中完成 example.com 桌面／平板／手机三尺寸截图，文件保存在 `artifacts/lazycat/`。整组 amd64 流水线在 Mac 模拟执行与镜像导出并行时遇到资源压力，因此停止了该次全链验证；不将该次尝试计为完整通过。此前原生 ARM 镜像的全链采集／等待认证验证通过。
 
 最终 LPK 包含五个 Linux amd64 镜像、33 个唯一镜像层，压缩及解压摘要、层大小、包内 override 一致性均通过。文件约 643.57 MiB，完整 SHA-256 随包提供于 `.lpk.sha256`。
+
+## 0.1.1 更新验证（2026-09-13）
+
+包含 Gemini／DeepSeek 模型切换及网页保存 DeepSeek API 密钥。沿用原包 ID 和持久目录，首次启动自动迁移数据库。当前 amd64 前端生产构建、Compose 隔离合并检查、五镜像平台检查、32 个唯一层压缩／解压摘要及最终包内 override 校验通过。新 worker 镜像已启动检查，确认最新凭证保存逻辑存在，本机 `.env`、`.auth`、`.data`、`deepseek_api` 均未打入。
+
+最终包 `release/design-harvester-0.1.1-amd64.lpk`，674703360 字节；SHA-256 `29f960fa053426e4ae29d14ecf70196f6ff60bb6b11367be0d82356001b4bd76`。本轮未进行 LC-02 实机安装或升级验收。
+
+## 0.1.2 实机修正（2026-09-13）
+
+在 lai（LZCOS 1.6.2、x86_64、Compose 2.32.4）取得安装日志：旧包先因 `invalid platform: linux/arm64` 拒绝，修正后又发现 `binds` 不接受 `:ro` 后缀。`unsupported_platforms` 表示客户端平台，不是 OCI 架构；已移除错误项并增加构建前校验。前端 library 只读属性移到 Compose override。
+
+此私有包为保留只读挂载，override 的 source 使用本设备实际 `/lzcsys/data/appvar/local.alcuin.design-harvester/library` 路径，属于平台内部布局依赖；跨版本或其他设备使用前须核实。官方不保证 override 兼容性。
+
+0.1.2 保留 0.1.1 的全部镜像，只修正包配置，未宣称完成镜像瘦身。平台已返回 Install succeeded；启动验证结果另记。
+
+实机进一步修正首次启动：PostgreSQL 健康探针改用 TCP，避免初始化临时 Unix socket 提前报告就绪；worker 显式设置 HOME；平台入口使用设置 API 探针并强制依赖健康的 web，web 强制依赖健康的 worker。默认平台服务就绪检测无法覆盖自定义隔离网络，因此保留各业务容器自身探针，以实际 HTTP 检查替换入口探针。
+
+最终重装 0.1.2 后 app、web、worker、postgres、browser、egress 六个容器全部 healthy，设置 API 返回 200；browser 仅连接 internal 的 capture 网络且无挂载，web 的 library 挂载确认 RW=false。最终 SHA-256：`7015b310acf7615c6b7cb9ae31faca16cd36abf61a4b2e8cece99f863061f4a8`。
+
+实机公共站点验收：example.com 三尺寸完整 PNG 已保存（18580／18424／14908 字节），任务 `0b449490-de57-4d74-8402-4cf284edce80` 在 `ANALYZING_DESIGN` 阶段按预期进入 `WAITING_AUTH`。未将 Mac 密钥或授权复制到设备。当前浏览器自动打开设备 HTTPS 入口超时，因此未宣称外部客户端页面视觉验收；设备入口容器访问设置 API 成功。
+
+## 0.1.3 布局、移动端下载与镜像瘦身
+
+- 桌面详情页由截图决定行高；Design DNA 与截图上下边缘对齐，独立滚动，仅在下方还有内容时渐隐。手机保持顺序阅读。
+- viewport 固定为 1，并拦截应用内双指手势、缩放滚轮和缩放快捷键；普通滚动与完整截图查看保留。浏览器自身菜单和操作系统的辅助缩放不受网页控制。
+- 所有下载入口在页面内 fetch 附件，避免直接导航到附件响应。支持文件分享的手机在文件准备后，由再次点击保存触发系统面板，避免大 ZIP 等待导致用户手势授权过期；取消后可重试。其他环境使用带文件名的 Blob 下载。使用标准 Web Share 的能力检测，未将需要设备本地路径的懒猫原生接口用于 HTTP 地址。参考 [Web Share API](https://developer.mozilla.org/en-US/docs/Web/API/Navigator/share) 与 [懒猫客户端文件分享接口](https://developer.lazycat.cloud/advanced-frontend-app-dev.html)。
+- worker 通过 pnpm deploy 只携带生产依赖及必要源码；egress 为独立最小依赖镜像。保留全部模型通道和浏览器引擎，不改变包 ID、持久路径与隔离网络。egress 的 override 入口同步改为镜像内的 Node 程序。
+
+本机 `pnpm typecheck`、`pnpm test`（11 项）、`pnpm build`、独立数据库 `pnpm test:integration`（5 项）通过。页面实测截图与 DNA 均为 560px，首尾位置相同；393px 手机布局无水平溢出。真实 Markdown 下载及 13,652,088 字节 ZIP 的移动端准备流程通过，下载 500 错误保留原页面。系统分享调用为模拟；0.1.3 未进行懒猫手机或 NAS 升级验收，也未触发真实模型生成。

@@ -10,12 +10,12 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 services = {}
-for name in ('web', 'worker', 'postgres', 'browser', 'egress'):
+for name in ('app', 'web', 'worker', 'postgres', 'browser', 'egress'):
     services[name] = {
         'image': 'alpine:3.21', 'networks': ['default'],
         'volumes': [{'type': 'bind', 'source': '/tmp/harvester-test-var', 'target': '/lzcapp/var'}],
     }
-services['web']['volumes'].append({'type': 'bind', 'source': '/tmp/harvester-test-library', 'target': '/data/library', 'read_only': True})
+services['web']['volumes'].append({'type': 'bind', 'source': '/tmp/harvester-test-library', 'target': '/data/library', 'read_only': False})
 services['browser']['entrypoint'] = ['/lzcapp/platform-wrapper']
 with tempfile.TemporaryDirectory(prefix='harvester-compose-') as temp:
     baseline = Path(temp) / 'base.json'

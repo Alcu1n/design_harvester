@@ -16,16 +16,30 @@ COPY --from=web-build /app/apps/web/.next/standalone ./
 COPY --from=web-build /app/apps/web/.next/static ./apps/web/.next/static
 USER node
 CMD ["node","apps/web/server.js"]
-FROM base AS worker
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+FROM base AS worker-deps
+RUN pnpm --filter @harvester/core deploy --legacy --prod /runtime/core
 RUN node docker/install-agy.mjs
-RUN mkdir -p /data/library /auth /work && chown -R node:node /data /auth /work
+FROM node:24-bookworm-slim AS worker
+RUN npm install --global pnpm@10.30.3 && rm -rf /root/.npm \
+    && apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=worker-deps /runtime/core ./packages/core
+COPY --from=worker-deps /usr/local/bin/agy /usr/local/bin/agy
+COPY package.json pnpm-workspace.yaml tsconfig.json ./
+COPY apps/worker/package.json ./apps/worker/package.json
+COPY apps/worker/src ./apps/worker/src
+COPY lazycat/worker-start.sh ./lazycat/worker-start.sh
+RUN ln -s packages/core/node_modules node_modules \
+    && mkdir -p /data/library /auth /work && chown -R node:node /data /auth /work
 USER node
 ENV LIBRARY_PATH=/data/library GEMINI_AUTH_HOME=/auth AGY_AUTH_HOME=/auth/antigravity AGY_BIN=/usr/local/bin/agy TMPDIR=/work
 CMD ["pnpm","worker"]
-FROM base AS egress
+FROM node:24-bookworm-slim AS egress
+WORKDIR /app
+RUN npm install --omit=dev tsx@4.21.0 ipaddr.js@2.3.0 zod@4.3.6 && rm -rf /root/.npm
+COPY packages/core/src/proxy.ts packages/core/src/security.ts packages/core/src/contracts.ts ./src/
 USER node
-CMD ["pnpm","--filter","@harvester/core","exec","tsx","src/proxy.ts"]
+CMD ["node","--import","tsx","src/proxy.ts"]
 FROM mcr.microsoft.com/playwright:v1.58.2-noble AS browser
 WORKDIR /browser
 RUN npm install --omit=dev playwright@1.58.2

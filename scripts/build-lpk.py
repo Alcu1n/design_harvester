@@ -11,6 +11,7 @@ import gzip
 import os
 import io
 import json
+import re
 from pathlib import Path
 import subprocess
 import tarfile
@@ -19,10 +20,12 @@ ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
 parser.add_argument('--finalize-only', action='store_true')
 args = parser.parse_args()
+subprocess.run(['node', 'scripts/validate-lpk-package.mjs'], cwd=ROOT, check=True)
 release = ROOT / 'release'
 release.mkdir(exist_ok=True)
-raw = release / 'design-harvester-0.1.0-amd64.raw.lpk'
-final = release / 'design-harvester-0.1.0-amd64.lpk'
+version = re.search(r'^version: ([0-9]+\.[0-9]+\.[0-9]+)$', (ROOT / 'package.yml').read_text(), re.M).group(1)
+raw = release / f'design-harvester-{version}-amd64.raw.lpk'
+final = release / f'design-harvester-{version}-amd64.lpk'
 if not args.finalize_only:
     subprocess.run(['python3', 'scripts/verify-lpk-isolation.py'], cwd=ROOT, check=True)
     # The CLI inspects external parents; buildx cache alone is insufficient.

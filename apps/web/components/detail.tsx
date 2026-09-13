@@ -3,7 +3,6 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
-  Download,
   Copy,
   RefreshCw,
   ExternalLink,
@@ -18,6 +17,8 @@ import remarkGfm from "remark-gfm";
 import * as Dialog from "@radix-ui/react-dialog";
 import { api, labels } from "./library";
 import { Button } from "./button";
+import { DownloadButton } from "./download-button";
+import { InspectorScroll } from "./inspector-scroll";
 const stages: Record<string, string> = {
   QUEUED: "等待开始",
   CAPTURING_DESKTOP: "采集桌面视图",
@@ -75,15 +76,9 @@ function Document({ url, name }: { url: string; name: string }) {
             {copied ? <Check size={15} /> : <Copy size={15} />}{" "}
             {copied ? "已复制" : "复制"}
           </Button>
-          <a
-            className="button button-secondary"
-            href={text ? url + "?download" : undefined}
-            aria-disabled={!text}
-            tabIndex={text ? 0 : -1}
-          >
-            <Download size={15} />
+          <DownloadButton key={url} url={url + "?download"} filename={name} disabled={!text}>
             下载
-          </a>
+          </DownloadButton>
         </div>
       </div>
       {error ? (
@@ -233,18 +228,19 @@ export function Detail({ id }: { id: string }) {
             重新采集
           </Button>
           {version && (
-            <a
-              className="button button-primary"
-              href={`/api/designs/${id}/export?version=${version.id}`}
+            <DownloadButton
+              key={version.id}
+              variant="default"
+              url={`/api/designs/${id}/export?version=${version.id}`}
+              filename={`design-${id}.zip`}
             >
-              <Download size={15} />
               {data.assets.some(
                 (a: string) =>
                   a === `${id}/versions/${version.id}/IOS_design.md`,
               )
                 ? "下载完整方案"
                 : "下载已有资产"}
-            </a>
+            </DownloadButton>
           )}
         </div>
       </div>
@@ -303,8 +299,7 @@ export function Detail({ id }: { id: string }) {
       {version && (
         <>
           <div className="detail-layout">
-            <section className="visual-section">
-              <div className="tabs" role="tablist" aria-label="截图尺寸">
+              <div className="tabs screenshot-tabs" role="tablist" aria-label="截图尺寸">
                 {[
                   ["desktop", "桌面"],
                   ["tablet", "平板"],
@@ -320,6 +315,7 @@ export function Detail({ id }: { id: string }) {
                   </button>
                 ))}
               </div>
+            <section className="visual-section">
               <Dialog.Root>
                 <Dialog.Trigger asChild>
                   <button
@@ -362,7 +358,7 @@ export function Detail({ id }: { id: string }) {
                 </Dialog.Portal>
               </Dialog.Root>
             </section>
-            <aside className="inspector">
+            <InspectorScroll>
               <p className="eyebrow">DESIGN DNA</p>
               <h2>
                 {analysis?.name ||
@@ -439,7 +435,7 @@ export function Detail({ id }: { id: string }) {
                       : "尚未完成检查"}
                 </span>
               </div>
-            </aside>
+            </InspectorScroll>
           </div>
           <div className="document-tabs tabs">
             {["DESIGN.md", "IOS_design.md"].map((n) => (
@@ -626,9 +622,9 @@ export function Detail({ id }: { id: string }) {
               </table>
             </div>
             <div className="actions">
-              <a href={snap + "evidence.json?download"}>下载 evidence.json</a>
-              <a href={base + "critic.json?download"}>下载质检记录</a>
-              <a href={base + "manifest.json?download"}>下载版本清单</a>
+              <DownloadButton key={snap + "evidence.json"} variant="ghost" url={snap + "evidence.json?download"} filename="evidence.json">下载 evidence.json</DownloadButton>
+              <DownloadButton key={base + "critic.json"} variant="ghost" url={base + "critic.json?download"} filename="critic.json">下载质检记录</DownloadButton>
+              <DownloadButton key={base + "manifest.json"} variant="ghost" url={base + "manifest.json?download"} filename="manifest.json">下载版本清单</DownloadButton>
             </div>
           </>
         ) : (

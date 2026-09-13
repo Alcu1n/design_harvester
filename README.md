@@ -88,10 +88,26 @@ pnpm --filter @harvester/core exec tsx src/ui-check.ts
 
 执行 `python3 scripts/build-lpk.py` 生成内嵌 amd64 镜像的 LPK V2 安装包。安装、会员登录、持久目录和备份说明见 [懒猫部署说明](docs/LAZYCAT.md)。
 
-## 切换 AI 服务
+### 打包与实机排障经验
 
-在「设置 → AI 连接」选择 Gemini 或 DeepSeek 并保存；选择 DeepSeek 时模型默认 `deepseek-flash`，可修改模型名称。设置对新任务和重新生成生效，已创建任务及重试保持原模型。DeepSeek 是主动选择的计费 API，不作为 Gemini 的自动备用。
+2026-09-13，`0.1.2` 已在 lai（LC-02，x86_64，LZCOS 1.6.2，Compose 2.32.4）安装验证。后续发布沿用包 ID `local.alcuin.design-harvester` 和持久目录，更新 `package.yml` 的版本号；不能只以本机构建成功作为交付验收。
 
-在设置页填写 DeepSeek API 密钥并保存，留空保留已有值，新值替换旧值；保存后输入框清空，接口不返回密钥。密钥保存在服务端 PostgreSQL 的独立配置记录中，数据库备份包含密钥，需按凭证保护。后台优先使用此密钥，再读取 `DEEPSEEK_API_KEY` / `DEEPSEEK_API_KEY_FILE`；本地开发仍可使用根目录 `deepseek_api`。已有数据库先运行 `pnpm db:migrate`，然后重启更新后的 web 和 worker。
+| 本次问题 | 后续必须保留的处理 |
+| --- | --- |
+| `invalid platform: linux/arm64` | `unsupported_platforms` 声明客户端平台，不是 Docker CPU 架构；架构在镜像构建和 OCI 校验中处理。构建前运行 `node scripts/validate-lpk-package.mjs`。 |
+| `invalid bind: …:ro` | 懒猫 `binds` 不接受 Docker 的 `:ro` 后缀；只读属性放入 Compose override，并在设备上确认 web 的 `/data/library` 为 `RW=false`。 |
+| 首次初始化时后台连接数据库失败 | PostgreSQL 健康检查使用 `pg_isready -h 127.0.0.1`，避免临时 Unix socket 提前报告就绪；worker 设置正确的 HOME。 |
+| 业务容器健康、平台入口仍未就绪 | 保留容器探针和启动依赖，入口以实际设置 API 检查就绪；不要为通过平台检测而取消浏览器网络隔离。 |
+| CLI 打包后个别镜像层截断 | 固定 CLI 2.0.9 的兼容加载器仍需保留；同时校验压缩摘要、解压摘要和层大小。升级 CLI 后重新验证，不能直接删除修复。 |
 
-Docker worker 可通过 `DEEPSEEK_API_KEY` 环境变量传入密钥，或将文件放入其专用授权卷 `/auth/deepseek_api`。懒猫 worker 使用同一文件路径。`deepseek_api` 已排除 Git 与 Docker 构建上下文。已有 0.1.0 LPK 不会随源码修改自动更新，部署新版需重新构建安装包。
+`!override` 用于整体替换浏览器的网络和挂载列表，不能改成追加。当前 web 只读挂载依赖实机路径 `/lzcsys/data/appvar/local.alcuin.design-harvester/library`；这是平台内部布局依赖，换设备或升级系统时必须复核。不要把它当成通用、稳定的部署接口。
+
+每次重新打包后检查最终包元数据、OCI 镜像与 override，再验证实机安装、六个容器健康、设置 API、实际网络／挂载和公共网页三尺寸采集。本次采集成功后按预期进入 `WAITING_AUTH`；不代表真实 AI 生成或外部客户端页面已验收。密钥、OAuth 授权、收藏数据和构建缓存不得进入安装包或 Git。
+
+排障先读设备包管理器日志和应用启动日志；`lzc-cli box list` 显示 READY 不代表开发者工具 SSH 已授权。具体错误、修复和验收记录见 [懒猫部署说明](docs/LAZYCAT.md)。
+
+### 0.1.3 运行镜像瘦身
+
+worker 使用独立的生产依赖目录和必要源码，出口代理只包含 tsx、ipaddr.js、zod 与代理源码；前端继续使用 Next.js standalone。保留 Chromium headless shell、Antigravity 和显式 Gemini CLI 通道，五镜像仍全部内嵌，不把安装包体积转移成首次安装下载量。
+
+详情页回归检查：启动网页后，执行 `node scripts/verify-detail-ui.mjs <详情页 URL>`。选择已有完整文档且 Design DNA 足够长的条目；脚本只读取资产，检查桌面等高／渐隐、缩放事件、下载错误恢复和移动端文件准备／取消／重试，不修改收藏或触发模型调用。移动端系统分享接口为模拟，不能替代客户端实机验收。
