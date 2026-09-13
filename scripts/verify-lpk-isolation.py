@@ -28,6 +28,7 @@ assert set(s['postgres']['networks']) == {'harvester_backend'}
 assert set(s['egress']['networks']) == {'harvester_capture', 'harvester_internet'}
 assert not s['browser'].get('volumes') and not s['egress'].get('volumes')
 assert s['browser']['entrypoint'] == ['node', '/browser/browser.mjs']
+assert s['egress']['entrypoint'] == ['node', '--import', 'tsx', '/app/src/proxy.ts']
 assert any(v['target'] == '/lzcapp/var' and v['type'] == 'tmpfs' for v in s['web']['volumes'])
 assert any(v['target'] == '/data/library' and v['read_only'] for v in s['web']['volumes'])
 assert merged['networks']['harvester_capture']['internal']

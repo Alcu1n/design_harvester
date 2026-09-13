@@ -107,3 +107,7 @@ LPK 的 browser 镜像采用 Playwright 1.58.2 的 Chromium headless shell（Deb
 - worker 通过 pnpm deploy 只携带生产依赖及必要源码；egress 为独立最小依赖镜像。保留全部模型通道和浏览器引擎，不改变包 ID、持久路径与隔离网络。egress 的 override 入口同步改为镜像内的 Node 程序。
 
 本机 `pnpm typecheck`、`pnpm test`（11 项）、`pnpm build`、独立数据库 `pnpm test:integration`（5 项）通过。页面实测截图与 DNA 均为 560px，首尾位置相同；393px 手机布局无水平溢出。真实 Markdown 下载及 13,652,088 字节 ZIP 的移动端准备流程通过，下载 500 错误保留原页面。系统分享调用为模拟；0.1.3 未进行懒猫手机或 NAS 升级验收，也未触发真实模型生成。
+
+最终包为 `release/design-harvester-0.1.3-amd64.lpk`，567,418,880 字节（541.13 MiB），比 0.1.2 的 674,703,360 字节减少 102.31 MiB（15.90%）。SHA-256：`3e5401909d517dcd1a21eeec7834691e91a4fe9617f7fc1f4b53ba9d9854dc3a`。五个 Linux amd64 镜像全量内嵌，32 个唯一层的压缩摘要、解压摘要和层大小均由构建脚本校验；最终 override 与源码一致。
+
+新镜像在全新临时数据库／资产目录中验证：worker 自动迁移并进入 ready，web 设置 API 返回 200；Gemini CLI 0.59.0 和 Antigravity 1.2.2 可执行；经独立出口代理完成 example.com 三尺寸截图（17,883／17,387／15,106 字节），私网目标返回 403。精简 worker 不含前端、测试目录、TypeScript 编译器或本机凭证；web 无 `.env` 或 `deepseek_api`。这些是本机 amd64 容器验证，未安装到 NAS。临时容器与测试数据已删除。
