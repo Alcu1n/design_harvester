@@ -5,7 +5,6 @@ import {
   renderDesign,
   renderIOS,
   splitCSSValues,
-  lintDesign,
   tokens,
   tokenConversions,
 } from "../src/render.ts";
@@ -19,18 +18,13 @@ test("CSS border shorthand retains function boundaries and distinct observed col
     splitCSSValues(e.viewports[0].elements[0].styles["border-color"]),
     ["rgb(38, 32, 26)", "oklch(0.6 0.1 120)"],
   );
-  assert.equal(lintDesign(renderDesign(e, analysis)).valid, true);
   assert.ok(Object.values(tokens(e).colors).includes("oklch(0.6 0.1 120)"));
   assert.equal(
     tokenConversions(e)[0].original,
     e.viewports[0].elements[0].styles["border-color"],
   );
   e.viewports[0].elements[0].styles["border-color"] = "not-a-real-color";
-  assert.equal(
-    lintDesign(renderDesign(e, analysis)).valid,
-    false,
-    "invalid observations are not silently discarded",
-  );
+  assert.match(renderDesign(e, analysis), /not-a-real-color/);
 });
 test("both rendered documents and translated warnings use English, YAML examples are not tokens", () => {
   const e = structuredClone(evidence);
@@ -43,7 +37,6 @@ test("both rendered documents and translated warnings use English, YAML examples
       "\n```yaml\ncolors:\n  invalid: not-a-color\n```",
   };
   const md = renderDesign(e, a);
-  assert.equal(lintDesign(md).valid, true);
   assert.match(md, /```text/);
   assert.doesNotMatch(md, /\p{Script=Han}/u);
   assert.doesNotMatch(
@@ -87,7 +80,7 @@ test("observed technical names remain intact while generated comments are checke
   assert.equal(englishIssues({ body: "Use `虚构品牌` here." }, e).length, 1);
 });
 
-test("official lint preserves complex colors and fractional typography without invented fallback", () => {
+test("renderer preserves complex colors and fractional typography without format rejection", () => {
   const e = structuredClone(evidence),
     styles = e.viewports[0].elements[0].styles;
   Object.assign(styles, {
@@ -100,23 +93,14 @@ test("official lint preserves complex colors and fractional typography without i
     "line-height": "72.125px",
     "letter-spacing": "-0.125px",
   });
-  const unsupported = lintDesign(renderDesign(e, analysis));
-  assert.equal(
-    unsupported.valid,
-    false,
-    "unsupported wide-gamut syntax must remain a visible official error",
-  );
-  assert.ok(unsupported.findings.some((f) => f.message.includes("display-p3")));
-  styles["border-top-color"] = "rgb(20 40 60)";
-  const report = lintDesign(renderDesign(e, analysis));
-  assert.equal(report.valid, true, JSON.stringify(report.findings));
+  assert.match(renderDesign(e, analysis), /color\(display-p3 0.2 0.4 0.6\)/);
   assert.equal((tokens(e).typography.h1 as any).fontWeight, 450);
   assert.equal((tokens(e).typography.h1 as any).fontSize, "64.25px");
   styles["font-weight"] = "not-a-weight";
-  assert.equal(lintDesign(renderDesign(e, analysis)).valid, false);
+  assert.match(renderDesign(e, analysis), /not-a-weight/);
   styles["font-weight"] = "400";
   styles["font-size"] = "not-a-size";
-  assert.equal(lintDesign(renderDesign(e, analysis)).valid, false);
+  assert.match(renderDesign(e, analysis), /not-a-size/);
 });
 
 test("Chinese translation cannot introduce or change measured numerals", () => {

@@ -31,6 +31,7 @@ assert s['browser']['entrypoint'] == ['node', '/browser/browser.mjs']
 assert s['egress']['entrypoint'] == ['node', '--import', 'tsx', '/app/src/proxy.ts']
 assert any(v['target'] == '/lzcapp/var' and v['type'] == 'tmpfs' for v in s['web']['volumes'])
 assert any(v['target'] == '/data/library' and v['read_only'] for v in s['web']['volumes'])
+assert any(v['target'] == '/data/imports' and not v.get('read_only', False) for v in s['web']['volumes'])
 assert merged['networks']['harvester_capture']['internal']
 assert merged['networks']['harvester_backend']['internal']
 print('Compose merge isolation checks passed')

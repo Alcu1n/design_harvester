@@ -1,3 +1,4 @@
+import { GenerationSchema } from "../src/generation.ts";
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -74,10 +75,10 @@ test(
         if (Object.is(schema, DisplayZhSchema)) return displayZh as any;
         if (Object.is(schema, TranslationReviewSchema))
           return { faithful: true, issues: [] } as any;
-        if (Object.is(schema, AnalysisSchema)) {
+        if (Object.is(schema, GenerationSchema)) {
           analysisCalls++;
           if (shouldCancel) await cancel(active);
-          return analysis as any;
+          return { analysis, displayZh } as any;
         }
         if (Object.is(schema, IOSSchema)) {
           if (failIOS)
@@ -119,26 +120,19 @@ test(
       const low = await createRun(d.canonical_url, id, sid);
       await processTask(low.runId, fake);
       result = await detail(id);
-      assert.equal(result.default_version_id, qualified);
-      assert.equal(result.versions[0].quality, "LOW_CONFIDENCE");
+      assert.equal(result.default_version_id, result.versions[0].id);
+      assert.equal(result.versions[0].quality, "SCORED");
+      assert.equal(result.versions[0].score, 60);
+      assert.equal(result.tasks[0].status, "READY");
       score = 80;
       const revision = await createRun(d.canonical_url, id, sid);
       const before = analysisCalls;
       await processTask(revision.runId, fake);
       assert.equal(
-        (
-          await sql("SELECT repair_state FROM tasks WHERE id=$1", [
-            revision.runId,
-          ])
-        )[0].repair_state.repairs,
+        analysisCalls - before,
         1,
+        "low scores do not cause regeneration",
       );
-      await sql("UPDATE tasks SET retry_at=now() WHERE id=$1", [
-        revision.runId,
-      ]);
-      await processTask(revision.runId, fake);
-      assert.equal(analysisCalls - before, 2);
-      assert.equal((await detail(id)).default_version_id, qualified);
       score = 94;
       failIOS = true;
       const failed = await createRun(d.canonical_url, id, sid);
@@ -146,13 +140,8 @@ test(
       assert.equal(
         (await sql("SELECT status FROM tasks WHERE id=$1", [failed.runId]))[0]
           .status,
-        "FAILED",
+        "READY",
       );
-      const count = analysisCalls;
-      failIOS = false;
-      await resume(failed.runId);
-      await processTask(failed.runId, fake);
-      assert.equal(analysisCalls, count, "saved analysis reused after failure");
       assert.notEqual((await detail(id)).default_version_id, qualified);
       shouldCancel = true;
       const canceled = await createRun(d.canonical_url, id, sid);
@@ -384,7 +373,7 @@ after(async () => {
   await pool.end();
 });
 
-// These providers are deterministic fixtures; official lint still executes normally.
+// Deterministic model fixtures; no real model or NAS acceptance is implied.
 async function repairFixture(
   run: (ctx: {
     id: string;
@@ -436,7 +425,7 @@ async function repairFixture(
   };
   const provider: DesignModelProvider = {
     async generate(schema) {
-      const step = Object.is(schema, AnalysisSchema)
+      const step = Object.is(schema, GenerationSchema)
         ? "analysis"
         : Object.is(schema, IOSSchema)
           ? "ios"
@@ -448,7 +437,12 @@ async function repairFixture(
                 ? "translationReview"
                 : "critic";
       calls[step] = (calls[step] || 0) + 1;
-      return (await answers[step]()) as any;
+      const answer = await answers[step]();
+      return (
+        step === "analysis"
+          ? { analysis: answer, displayZh: await answers.translation() }
+          : answer
+      ) as any;
     },
   };
   try {
@@ -476,135 +470,96 @@ async function repairFixture(
 }
 
 test(
-  "content repairs persist, wait, exhaust five extra calls and allow a manual fresh budget",
+  "normal pipeline uses exactly three calls and never runs language review",
   { skip: !enabled },
   async () => {
     await repairFixture(async (c) => {
       c.change("analysis", () => ({
         ...analysis,
-        summary: "未通过的中文候选 " + c.calls.analysis,
+        summary: "中文内容需要改进。",
       }));
-      for (let i = 0; i < 6; i++) {
-        await processTask(c.runId, c.provider);
-        const [t] = await sql("SELECT * FROM tasks WHERE id=$1", [c.runId]);
-        assert.equal(t.repair_state.repairs, Math.min(i + 1, 5));
-        assert.equal(
-          t.attempts,
-          i === 5 ? 1 : 0,
-          "content repair does not consume transport retries",
-        );
-        if (i < 5) {
-          assert.equal(t.status, "QUEUED");
-          assert.ok(t.retry_at);
-          const before = c.calls.analysis;
-          await processTask(c.runId, c.provider);
-          assert.equal(c.calls.analysis, before, "retry time is honored");
-          await c.due();
-        } else assert.equal(t.status, "FAILED");
-      }
-      assert.equal(c.calls.analysis, 6);
-      assert.equal(c.calls.ios, 6, "iOS generation runs even for every rejected web candidate");
-      const { files } = await import("../src/storage.ts");
-      assert.equal(
-        (await files(c.prefix + "/candidates")).filter((f) =>
-          f.endsWith("/analysis.json"),
-        ).length,
-        6,
-      );
-      await resume(c.runId);
-      c.change("analysis", () => analysis);
-      await processTask(c.runId, c.provider);
-      await c.due();
-      await processTask(c.runId, c.provider);
-      const result = await detail(c.id);
-      assert.equal(result.tasks[0].status, "READY");
-      assert.equal(result.versions[0].metadata.language, "en");
-      assert.equal(result.versions[0].display_zh.summary, displayZh.summary);
-    });
-  },
-);
-
-test(
-  "identical failed content stops without spending all five repairs",
-  { skip: !enabled },
-  async () => {
-    await repairFixture(async (c) => {
-      c.change("analysis", () => ({
-        ...analysis,
-        summary: "同一份不合格内容。",
+      c.change("language", () => ({
+        englishWeb: false,
+        englishIOS: true,
+        issues: [
+          {
+            target: "analysis",
+            path: "summary",
+            message: "Rewrite in natural English.",
+          },
+        ],
       }));
       await processTask(c.runId, c.provider);
-      await c.due();
-      await processTask(c.runId, c.provider);
-      const [t] = await sql("SELECT * FROM tasks WHERE id=$1", [c.runId]);
-      assert.equal(t.status, "FAILED");
-      assert.equal(t.repair_state.repairs, 1);
-      assert.match(t.error.message, /未产生进展/);
-    });
-  },
-);
-
-test(
-  "translation repair reuses the final English documents across worker invocations",
-  { skip: !enabled },
-  async () => {
-    await repairFixture(async (c) => {
-      c.change("translation", () =>
-        c.calls.translation === 1
-          ? { ...displayZh, summary: "This is not a Chinese translation." }
-          : displayZh,
-      );
-      await processTask(c.runId, c.provider);
-      const { getJSON } = await import("../src/storage.ts");
-      const [before] = await sql("SELECT repair_state FROM tasks WHERE id=$1", [
-        c.runId,
-      ]);
-      const source = before.repair_state.outputs.analysis;
-      await c.due();
-      await processTask(c.runId, c.provider);
-      assert.equal(c.calls.analysis, 1);
+      const r = await detail(c.id);
+      assert.equal(r.tasks[0].status, "READY");
+      assert.equal(r.versions[0].score, 95);
+      assert.equal(r.versions[0].validation.advisory, true);
+      assert.deepEqual(c.calls, { analysis: 1, ios: 1, critic: 1 });
+      assert.equal(r.versions[0].display_zh.summary, displayZh.summary);
+      assert.equal(r.tasks[0].repair_state.repairs, 0);
       assert.equal(c.calls.ios, 1);
-      assert.equal(c.calls.critic, 1);
-      assert.equal(c.calls.translation, 2);
-      assert.equal(
-        (await getJSON(c.prefix + "/display-zh.json")).sourceCandidate,
-        source,
-      );
-      assert.equal((await detail(c.id)).tasks[0].status, "READY");
     });
   },
 );
 
 test(
-  "legacy Chinese caches are preserved and cannot bypass new language checks",
+  "optional stages fail independently and model grading falls back without blocking completion",
   { skip: !enabled },
   async () => {
     await repairFixture(async (c) => {
-      const legacy = { ...analysis, summary: "历史中文文档。" };
-      await putJSON(c.prefix + "/analysis.json", legacy);
-      await put(c.prefix + "/DESIGN.md", "historical document");
-      await sql(
-        'UPDATE versions SET metadata=metadata||\'{"language":"zh-CN"}\'::jsonb WHERE id=$1',
-        [c.versionId],
-      );
+      for (const step of ["ios", "critic"])
+        c.change(step, () => {
+          throw new HarvestError("MODEL_FAILED", step + " unavailable");
+        });
       await processTask(c.runId, c.provider);
+      const r = await detail(c.id);
+      assert.equal(r.tasks[0].status, "READY");
       assert.equal(
-        c.calls.analysis,
-        undefined,
-        "first inspect the old cached analysis",
+        r.versions[0].metadata.scoringMethod,
+        "deterministic-completeness-v1",
       );
-      assert.equal((await detail(c.id)).tasks[0].status, "QUEUED");
-      await c.due();
+      assert.equal(typeof r.versions[0].score, "number");
+      assert.ok(r.versions[0].score < 60);
+      assert.equal(r.versions[0].display_zh.summary, displayZh.summary);
+      for (const step of ["ios", "critic"]) assert.equal(c.calls[step], 3);
+      assert.equal(r.versions[0].validation.issues.length, 2);
+    });
+  },
+);
+
+test(
+  "missing Chinese output preserves English documents and supports separate generation",
+  { skip: !enabled },
+  async () => {
+    await repairFixture(async (c) => {
+      c.change("translation", () => undefined);
       await processTask(c.runId, c.provider);
-      const { get, getJSON } = await import("../src/storage.ts");
+      const r = await detail(c.id);
+      assert.equal(r.tasks[0].status, "READY");
+      assert.equal(r.versions[0].display_zh, null);
+      assert.equal(c.calls.analysis, 1);
+      assert.equal(c.calls.critic, 1);
+      assert.equal(c.calls.translation, undefined);
+    });
+  },
+);
+
+test(
+  "legacy Chinese caches are archived and regenerated in English",
+  { skip: !enabled },
+  async () => {
+    await repairFixture(async (c) => {
+      await putJSON(c.prefix + "/analysis.json", {
+        ...analysis,
+        summary: "历史中文文档。",
+      });
+      await put(c.prefix + "/DESIGN.md", "historical document");
+      await processTask(c.runId, c.provider);
+      const { get } = await import("../src/storage.ts");
       assert.equal(
         (await get(c.prefix + "/legacy/DESIGN.md")).toString(),
         "historical document",
       );
-      assert.equal(
-        (await getJSON(c.prefix + "/legacy/analysis.json")).summary,
-        legacy.summary,
-      );
       assert.equal(c.calls.analysis, 1);
       assert.equal((await detail(c.id)).tasks[0].status, "READY");
     });
@@ -612,156 +567,80 @@ test(
 );
 
 test(
-  "auth and quota pauses retain repair count; cancellation prevents publication",
+  "auth/quota before document creation stay paused and still receive conservative scores",
   { skip: !enabled },
   async () => {
-    await repairFixture(async (c) => {
-      c.change("analysis", () =>
-        c.calls.analysis === 1
-          ? { ...analysis, summary: "需要英文修复。" }
-          : analysis,
-      );
-      c.change("ios", () => {
-        if (c.calls.ios === 1)
-          return {
-            sections: iosSections.map((heading) => ({
-              heading,
-              body: "Use native iOS conventions.",
-            })),
-          };
-        throw new HarvestError("AUTH_REQUIRED", "测试授权失效");
+    for (const code of [
+      "AUTH_REQUIRED",
+      "QUOTA_EXHAUSTED",
+      "MODEL_CONFIGURATION_REQUIRED",
+    ])
+      await repairFixture(async (c) => {
+        c.change("analysis", () => {
+          throw new HarvestError(code, "测试提供方暂停");
+        });
+        await processTask(c.runId, c.provider);
+        const r = await detail(c.id);
+        assert.ok(r.tasks[0].status.startsWith("WAITING_"));
+        assert.equal(r.versions[0].score, 0);
+        assert.equal(r.default_version_id, null);
+        assert.equal(c.calls.ios, undefined);
       });
-      await processTask(c.runId, c.provider);
-      await c.due();
-      await processTask(c.runId, c.provider);
-      let result = await detail(c.id);
-      assert.equal(result.tasks[0].status, "WAITING_AUTH");
-      assert.equal(result.tasks[0].repair_state.repairs, 1);
-      await resume(c.runId);
-      c.change("ios", () => {
-        throw new HarvestError("QUOTA_EXHAUSTED", "测试额度不足");
-      });
-      await processTask(c.runId, c.provider);
-      result = await detail(c.id);
-      assert.equal(result.tasks[0].status, "WAITING_QUOTA");
-      assert.equal(result.tasks[0].repair_state.repairs, 1);
-      await cancel(c.runId);
-      await processTask(c.runId, c.provider);
-      result = await detail(c.id);
-      assert.equal(result.tasks[0].status, "CANCELED");
-      assert.equal(result.default_version_id, null);
-    });
   },
 );
 
 test(
-  "English semantic review repairs iOS alone and translation fidelity shares the same budget",
+  "auth failure after DESIGN.md avoids further unavailable provider calls and completes with a score",
   { skip: !enabled },
   async () => {
     await repairFixture(async (c) => {
-      c.change("language", () =>
-        c.calls.language === 1
-          ? {
-              englishWeb: true,
-              englishIOS: false,
-              issues: [
-                {
-                  target: "ios",
-                  path: "sections.0.body",
-                  message: "The wording is not idiomatic English.",
-                },
-              ],
-            }
-          : { englishWeb: true, englishIOS: true, issues: [] },
-      );
-      c.change("translationReview", () =>
-        c.calls.translationReview === 1
-          ? { faithful: false, issues: ["译文增加了一条没有证据的结论。"] }
-          : { faithful: true, issues: [] },
-      );
+      c.change("ios", () => {
+        throw new HarvestError("AUTH_REQUIRED", "测试登录失效");
+      });
       await processTask(c.runId, c.provider);
-      await c.due();
-      await processTask(c.runId, c.provider);
-      assert.equal(c.calls.analysis, 1);
-      assert.equal(c.calls.ios, 2);
-      assert.equal((await detail(c.id)).tasks[0].repair_state.repairs, 2);
-      await c.due();
-      await processTask(c.runId, c.provider);
-      const result = await detail(c.id);
-      assert.equal(result.tasks[0].status, "READY");
-      assert.equal(c.calls.ios, 2);
-      assert.equal(c.calls.translation, 2);
+      const r = await detail(c.id);
+      assert.equal(r.tasks[0].status, "READY");
+      assert.equal(c.calls.critic, undefined);
+      assert.equal(c.calls.translation, undefined);
       assert.equal(
-        result.versions[0].display_zh.sourceCandidate,
-        result.versions[0].validation.candidates.analysis,
+        r.versions[0].metadata.scoringMethod,
+        "deterministic-completeness-v1",
       );
     });
   },
 );
 
 test(
-  "network retry does not renew the content repair budget",
+  "invalid analysis without a document retains scheduled retries, persisted budget and restart recovery",
   { skip: !enabled },
   async () => {
     await repairFixture(async (c) => {
       c.change("analysis", () => {
         if (c.calls.analysis === 1)
-          return { ...analysis, summary: "第一次中文内容。" };
-        if (c.calls.analysis === 2)
-          throw new HarvestError("MODEL_TIMEOUT", "temporary network timeout");
+          throw new HarvestError(
+            "MODEL_SCHEMA_INVALID",
+            "Missing required analysis fields",
+          );
         return analysis;
       });
       await processTask(c.runId, c.provider);
+      let r = await detail(c.id);
+      assert.equal(r.tasks[0].status, "QUEUED");
+      assert.equal(r.tasks[0].attempts, 1);
+      assert.equal(r.versions[0].score, 0);
+      await processTask(c.runId, c.provider);
+      assert.equal(c.calls.analysis, 1);
       await c.due();
       await processTask(c.runId, c.provider);
-      let result = await detail(c.id);
-      assert.equal(result.tasks[0].status, "QUEUED");
-      assert.equal(result.tasks[0].repair_state.repairs, 1);
-      await c.due();
-      await processTask(c.runId, c.provider);
-      result = await detail(c.id);
-      assert.equal(result.tasks[0].status, "READY");
-      assert.equal(result.tasks[0].repair_state.repairs, 1);
+      r = await detail(c.id);
+      assert.equal(r.tasks[0].status, "READY");
+      assert.equal(r.versions[0].score, 95);
     });
   },
 );
 
 test(
-  "quality revision consumes the shared budget without resetting earlier repairs",
-  { skip: !enabled },
-  async () => {
-    await repairFixture(async (c) => {
-      c.change("analysis", () =>
-        c.calls.analysis === 1
-          ? { ...analysis, summary: "待修复的中文。" }
-          : analysis,
-      );
-      c.change("critic", () => ({
-        score: c.calls.critic <= 2 ? 80 : 95,
-        subscores: {
-          evidenceAccuracy: 95,
-          visualFidelity: 95,
-          designAbstraction: 95,
-          responsiveUnderstanding: 95,
-          iosAdaptation: 95,
-        },
-        issues: [],
-      }));
-      await processTask(c.runId, c.provider);
-      await c.due();
-      await processTask(c.runId, c.provider);
-      assert.equal((await detail(c.id)).tasks[0].repair_state.repairs, 2);
-      await c.due();
-      await processTask(c.runId, c.provider);
-      const result = await detail(c.id);
-      assert.equal(result.tasks[0].status, "READY");
-      assert.equal(result.tasks[0].repair_state.repairs, 2);
-    });
-  },
-);
-
-test(
-  "official token failure still generates iOS, Chinese DNA and every review",
+  "unsupported official tokens never invoke lint or block completion and grading",
   { skip: !enabled },
   async () => {
     await repairFixture(async (c) => {
@@ -777,47 +656,27 @@ test(
       );
       await processTask(c.runId, c.provider);
       const result = await detail(c.id);
-      assert.equal(result.tasks[0].status, "FAILED");
-      assert.equal(result.tasks[0].error.code, "TOKEN_NORMALIZATION_FAILED");
-      for (const step of [
-        "analysis",
-        "ios",
-        "language",
-        "critic",
-        "translation",
-        "translationReview",
-      ])
+      assert.equal(result.tasks[0].status, "READY");
+      assert.equal(result.tasks[0].error, null);
+      assert.equal(result.versions[0].score, 95);
+      for (const step of ["analysis", "ios", "critic"])
         assert.equal(c.calls[step], 1, step);
       const { exists } = await import("../src/storage.ts");
       assert.equal(await exists(c.prefix + "/IOS_design.md"), true);
       assert.equal(await exists(c.prefix + "/critic.json"), true);
       assert.equal(result.versions[0].display_zh.summary, displayZh.summary);
-      assert.equal(result.versions[0].validation.valid, false);
-      assert.equal(result.default_version_id, null);
+      assert.equal(result.versions[0].validation.officialLint, "disabled");
+      assert.equal(result.default_version_id, c.versionId);
     });
   },
 );
 
 test(
-  "manual completion preserves failed validation and survives a stale worker",
+  "manual completion survives a stale worker and obtains a conservative score",
   { skip: !enabled },
   async () => {
     const { setTaskStatus } = await import("../src/service.ts");
     await repairFixture(async (c) => {
-      c.change("analysis", () => ({
-        ...analysis,
-        summary: "未通过的中文说明。",
-      }));
-      await processTask(c.runId, c.provider);
-      await setTaskStatus(c.runId, "READY");
-      let result = await detail(c.id);
-      assert.equal(result.tasks[0].status, "READY");
-      assert.equal(result.versions[0].validation.valid, false);
-      assert.equal(result.default_version_id, null);
-      assert.equal(result.tasks[0].manual_status.previousStatus, "QUEUED");
-      await setTaskStatus(c.runId, "FAILED");
-      await resume(c.runId);
-      c.change("analysis", () => analysis);
       c.change("ios", async () => {
         await setTaskStatus(c.runId, "READY");
         return {
@@ -828,19 +687,11 @@ test(
         };
       });
       await processTask(c.runId, c.provider);
-      result = await detail(c.id);
-      assert.equal(
-        result.tasks[0].status,
-        "READY",
-        "late cancellation must not overwrite a manual status",
-      );
-      assert.equal(result.default_version_id, null);
-      assert.equal(result.tasks[0].manual_status.status, "READY");
-      assert.ok(
-        result.tasks[0].events.some(
-          (e: any) => e.stage === "MANUAL_STATUS_CHANGED",
-        ),
-      );
+      const r = await detail(c.id);
+      assert.equal(r.tasks[0].status, "READY");
+      assert.equal(r.tasks[0].manual_status.status, "READY");
+      assert.equal(typeof r.versions[0].score, "number");
+      assert.equal(r.default_version_id, null);
       await assert.rejects(() => setTaskStatus(c.runId, "RUNNING" as any));
     });
   },
@@ -872,7 +723,7 @@ test(
 );
 
 test(
-  "resuming a manually marked qualified task creates a new version",
+  "resuming a manually marked completed task creates a new version",
   { skip: !enabled },
   async () => {
     const { setTaskStatus } = await import("../src/service.ts");
@@ -886,10 +737,353 @@ test(
       assert.equal(result.versions.length, 2);
       assert.equal(
         result.versions.find((v: any) => v.id === original)?.quality,
-        "QUALIFIED",
+        "SCORED",
       );
       assert.equal(result.tasks[0].status, "QUEUED");
       assert.notEqual(result.tasks[0].id, c.runId);
+    });
+  },
+);
+
+test(
+  "historical missing scores are backfilled without model calls or overwriting old artifacts",
+  { skip: !enabled },
+  async () => {
+    await repairFixture(async (c) => {
+      await put(c.prefix + "/DESIGN.md", "# Historical design");
+      await put(
+        c.prefix + "/critic.json",
+        '{"original":"preserve this raw report"}',
+      );
+      await sql("UPDATE tasks SET status='FAILED' WHERE id=$1", [c.runId]);
+      const r = await detail(c.id);
+      assert.equal(typeof r.versions[0].score, "number");
+      assert.equal(
+        r.versions[0].metadata.scoringMethod,
+        "deterministic-completeness-v1",
+      );
+      assert.deepEqual(c.calls, {});
+      const { get, getJSON } = await import("../src/storage.ts");
+      assert.equal(
+        (await get(c.prefix + "/critic.json")).toString(),
+        '{"original":"preserve this raw report"}',
+      );
+      assert.equal(
+        r.versions[0].metadata.scoringResult.score,
+        r.versions[0].score,
+      );
+      const second = await detail(c.id);
+      assert.equal(
+        second.versions[0].metadata.scoringReport,
+        r.versions[0].metadata.scoringReport,
+      );
+    });
+  },
+);
+
+test(
+  "old accepted translations are restored despite nonempty semantic review notes",
+  { skip: !enabled },
+  async () => {
+    await repairFixture(async (c) => {
+      const source = c.prefix + "/candidates/old/analysis.json",
+        translation = c.prefix + "/candidates/old/translation.json";
+      await putJSON(source, analysis);
+      await putJSON(translation, displayZh);
+      await sql("UPDATE versions SET analysis=$2,validation=$3 WHERE id=$1", [
+        c.versionId,
+        JSON.stringify(analysis),
+        JSON.stringify({
+          valid: false,
+          candidates: { analysis: source },
+          issues: [{ message: "可接受" }],
+        }),
+      ]);
+      await sql("UPDATE tasks SET status='READY',repair_state=$2 WHERE id=$1", [
+        c.runId,
+        JSON.stringify({ outputs: { analysis: source, translation } }),
+      ]);
+      const r = await detail(c.id);
+      assert.equal(r.versions[0].display_zh.summary, displayZh.summary);
+      assert.deepEqual(c.calls, {});
+    });
+  },
+);
+
+test(
+  "presentation-only job does not rewrite documents or change original status/score/default",
+  { skip: !enabled },
+  async () => {
+    await repairFixture(async (c) => {
+      c.change("translation", () => undefined);
+      await processTask(c.runId, c.provider);
+      const { queuePresentation } = await import("../src/presentation-job.ts");
+      const { get } = await import("../src/storage.ts");
+      const before = await get(c.prefix + "/DESIGN.md");
+      const original = await detail(c.id);
+      const repair = await queuePresentation(c.id, c.versionId);
+      c.change("translation", () => displayZh);
+      await processTask(repair.runId, c.provider);
+      const result = await detail(c.id);
+      assert.deepEqual(await get(c.prefix + "/DESIGN.md"), before);
+      assert.equal(result.versions[0].score, original.versions[0].score);
+      assert.equal(result.default_version_id, original.default_version_id);
+      assert.equal(result.versions[0].display_zh.summary, displayZh.summary);
+      assert.equal(
+        result.tasks.find((t: any) => t.id === c.runId)!.status,
+        "READY",
+      );
+      assert.equal(c.calls.translation, 1);
+      assert.equal(c.calls.analysis, 1);
+      assert.equal(c.calls.ios, 1);
+    });
+  },
+);
+
+test(
+  "multiple image import archives originals, bypasses browser, preserves order and regenerates from snapshot",
+  { skip: !enabled },
+  async () => {
+    const { createImageRun, importRoot } = await import(
+      "../src/image-import.ts"
+    );
+    const { getJSON, get } = await import("../src/storage.ts");
+    const sharp = (await import("sharp")).default;
+    const bytes = await sharp({
+      create: { width: 80, height: 140, channels: 3, background: "#f2e7cd" },
+    })
+      .png()
+      .toBuffer();
+    const run = await createImageRun(
+      [
+        new File([new Uint8Array(bytes)], "first.png", { type: "image/png" }),
+        new File([new Uint8Array(bytes)], "second.png", { type: "image/png" }),
+      ],
+      "图片设计",
+      "Two screens from one app",
+    );
+    let count = 0;
+    const fake: DesignModelProvider = {
+      async generate(schema, _instruction, input, images) {
+        count++;
+        if (Object.is(schema, GenerationSchema)) {
+          assert.equal(images?.length, 2);
+          assert.equal((input as any).evidence.kind, "images");
+          return {
+            analysis: {
+              ...analysis,
+              overview:
+                "Warm colors and clear visual hierarchy define a reusable interface.",
+              signatureTraits: analysis.signatureTraits.map((t) => ({
+                ...t,
+                evidenceIds: ["image-1"],
+              })),
+              visualEstimates: {
+                colors: [{ value: "#f2e7cd", role: "Warm background" }],
+                fontStyle: "A rounded sans-serif style; exact family unknown.",
+              },
+            },
+            displayZh: {
+              ...displayZh,
+              signatureTraits: displayZh.signatureTraits.map((t) => ({
+                ...t,
+                evidenceIds: ["image-1"],
+              })),
+            },
+          } as any;
+        }
+        if (Object.is(schema, IOSSchema))
+          return {
+            sections: iosSections.map((heading) => ({
+              heading,
+              body: "Use native platform behavior as an implementation proposal.",
+            })),
+          } as any;
+        return {
+          score: 80,
+          subscores: {
+            evidenceAccuracy: 80,
+            visualFidelity: 80,
+            designAbstraction: 80,
+            responsiveUnderstanding: 80,
+            iosAdaptation: 80,
+          },
+          issues: [],
+        } as any;
+      },
+    };
+    try {
+      await processTask(run.runId, fake);
+      let r = await detail(run.designId);
+      assert.equal(r.source_kind, "images");
+      assert.equal(r.canonical_url, null);
+      assert.equal(r.tasks[0].status, "READY");
+      assert.equal(count, 3);
+      const snapshot = `${r.id}/snapshots/${r.versions[0].snapshot_id}`;
+      const e = await getJSON(snapshot + "/evidence.json");
+      assert.deepEqual(
+        e.images.map((i: any) => i.name),
+        ["first.png", "second.png"],
+      );
+      assert.deepEqual(e.viewports, []);
+      assert.deepEqual(await get(snapshot + "/" + e.images[0].path), bytes);
+      assert.equal(
+        (
+          await sql("SELECT import_id FROM snapshots WHERE id=$1", [
+            r.versions[0].snapshot_id,
+          ])
+        )[0].import_id,
+        null,
+      );
+      const md = (
+        await get(`${r.id}/versions/${r.versions[0].id}/DESIGN.md`)
+      ).toString();
+      assert.match(md, /visual estimate/);
+      assert.doesNotMatch(md, /fontSize: 64px/);
+      const next = await createRun(null, r.id, r.versions[0].snapshot_id);
+      await processTask(next.runId, fake);
+      r = await detail(r.id);
+      assert.equal(r.versions.length, 2);
+      assert.equal(r.tasks[0].status, "READY");
+      assert.equal(count, 6);
+    } finally {
+      await sql("DELETE FROM designs WHERE id=$1", [run.designId]);
+      await removeDesign(run.designId);
+    }
+  },
+);
+
+test(
+  "stale Chinese cache is not attached to a changed English candidate",
+  { skip: !enabled },
+  async () => {
+    await repairFixture(async (c) => {
+      const source = c.prefix + "/candidates/old/analysis.json";
+      await putJSON(source, analysis);
+      await putJSON(c.prefix + "/display-zh.json", {
+        ...displayZh,
+        sourceCandidate: source,
+      });
+      await sql(
+        "UPDATE versions SET analysis=$2,metadata=metadata||$3::jsonb WHERE id=$1",
+        [
+          c.versionId,
+          JSON.stringify({
+            ...analysis,
+            summary: "A different English design.",
+          }),
+          JSON.stringify({ analysisCandidate: source }),
+        ],
+      );
+      const result = await detail(c.id);
+      assert.equal(result.versions[0].display_zh, null);
+      assert.deepEqual(c.calls, {});
+    });
+  },
+);
+test(
+  "DNA recovery retries technical failures twice and reuses a persisted candidate after restart",
+  { skip: !enabled },
+  async () => {
+    await repairFixture(async (c) => {
+      c.change("translation", () => undefined);
+      await processTask(c.runId, c.provider);
+      const { queuePresentation } = await import("../src/presentation-job.ts");
+      const { fingerprint } = await import("../src/content-checks.ts");
+      const repair = await queuePresentation(c.id, c.versionId);
+      c.change("translation", () => {
+        if (c.calls.translation < 3)
+          throw new HarvestError("MODEL_TIMEOUT", "Temporary timeout");
+        return displayZh;
+      });
+      await processTask(repair.runId, c.provider);
+      assert.equal(c.calls.translation, 3);
+      let result = await detail(c.id);
+      assert.equal(result.versions[0].display_zh.summary, displayZh.summary);
+      const again = await queuePresentation(c.id, c.versionId);
+      const report = c.prefix + "/presentations/restart.json";
+      await putJSON(report, displayZh);
+      await sql("UPDATE tasks SET repair_state=$2 WHERE id=$1", [
+        again.runId,
+        JSON.stringify({
+          presentation: {
+            hash: fingerprint(analysis),
+            path: report,
+            attempts: 2,
+          },
+        }),
+      ]);
+      await processTask(again.runId, c.provider);
+      assert.equal(c.calls.translation, 3);
+      result = await detail(c.id);
+      assert.equal(
+        result.tasks.find((t: any) => t.id === again.runId)!.status,
+        "READY",
+      );
+    });
+  },
+);
+test(
+  "cancellation during DNA recovery cannot publish a late translation",
+  { skip: !enabled },
+  async () => {
+    await repairFixture(async (c) => {
+      c.change("translation", () => undefined);
+      await processTask(c.runId, c.provider);
+      const { queuePresentation } = await import("../src/presentation-job.ts");
+      const repair = await queuePresentation(c.id, c.versionId);
+      const provider: DesignModelProvider = {
+        async generate() {
+          await cancel(repair.runId);
+          return displayZh as any;
+        },
+      };
+      await processTask(repair.runId, provider);
+      const result = await detail(c.id);
+      assert.equal(result.versions[0].display_zh, null);
+      assert.equal(
+        result.tasks.find((t: any) => t.id === repair.runId)!.status,
+        "CANCELED",
+      );
+      assert.equal(
+        result.tasks.find((t: any) => t.id === c.runId)!.status,
+        "READY",
+      );
+    });
+  },
+);
+
+test(
+  "historical image score backfill also excludes the single-image consistency dimension",
+  { skip: !enabled },
+  async () => {
+    await repairFixture(async (c) => {
+      const [v] = await sql("SELECT snapshot_id FROM versions WHERE id=$1", [
+        c.versionId,
+      ]);
+      await putJSON(`${c.id}/snapshots/${v.snapshot_id}/evidence.json`, {
+        ...evidence,
+        kind: "images",
+        viewports: [],
+        images: [{ id: "image-1" }],
+      });
+      await putJSON(c.prefix + "/critic.json", {
+        score: 64,
+        subscores: {
+          evidenceAccuracy: 80,
+          visualFidelity: 80,
+          designAbstraction: 80,
+          responsiveUnderstanding: 0,
+          iosAdaptation: 80,
+        },
+        issues: [],
+      });
+      await sql("UPDATE tasks SET status='READY' WHERE id=$1", [c.runId]);
+      const r = await detail(c.id);
+      assert.equal(r.versions[0].score, 80);
+      assert.deepEqual(r.versions[0].metadata.scoringResult.notApplicable, [
+        "responsiveUnderstanding",
+      ]);
     });
   },
 );

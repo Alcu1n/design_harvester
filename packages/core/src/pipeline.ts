@@ -1,12 +1,20 @@
+import { archiveImages } from "./image-import.ts";
+import { processPresentation } from "./presentation-job.ts";
+import { safePath } from "./storage.ts";
 import { generateDocuments } from "./generation.ts";
 import { modelProvider } from "./provider.ts";
 import { clearTiles } from "./storage.ts";
 import { pool, sql } from "./db.ts";
 import { capture, visualInputs } from "./browser.ts";
 import { type DesignModelProvider } from "./model.ts";
-import { eligible, HarvestError, type Evidence } from "./contracts.ts";
-import { getJSON, putJSON, put, exists, manifest } from "./storage.ts";
-import { renderDesign, renderIOS } from "./render.ts";
+import {
+  CriticSchema,
+  HarvestError,
+  isImageEvidence,
+  type Evidence,
+} from "./contracts.ts";
+import { getJSON, putJSON, put, exists, manifest, get } from "./storage.ts";
+import { fallbackQuality } from "./quality.ts";
 export async function processTask(id: string, provider?: DesignModelProvider) {
   const connection = await pool.connect();
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -63,6 +71,14 @@ export async function processTask(id: string, provider?: DesignModelProvider) {
     const snapshot = `${task.design_id}/snapshots/${task.snapshot_id}`,
       version = `${task.design_id}/versions/${task.version_id}`;
     try {
+      if (task.kind === "PRESENTATION") {
+        await processPresentation(task, stage, controller.signal, provider);
+        return;
+      }
+      const [design] = await sql(
+        "SELECT source_kind FROM designs WHERE id=$1",
+        [task.design_id],
+      );
       const [generation] = await sql(
         "SELECT metadata FROM versions WHERE id=$1",
         [task.version_id],
@@ -71,7 +87,10 @@ export async function processTask(id: string, provider?: DesignModelProvider) {
       let evidence: Evidence;
       if (await exists(snapshot + "/evidence.json"))
         evidence = await getJSON(snapshot + "/evidence.json");
-      else {
+      else if (design?.source_kind === "images") {
+        await stage("IMPORTING_IMAGES");
+        evidence = await archiveImages(snapshot, task.snapshot_id);
+      } else {
         if (task.kind === "REGENERATE")
           throw new HarvestError(
             "EVIDENCE_FAILED",
@@ -86,8 +105,10 @@ export async function processTask(id: string, provider?: DesignModelProvider) {
         );
       }
       await manifest(snapshot, { snapshotId: task.snapshot_id });
-      const images = await visualInputs(snapshot);
-      const { analysis, ios, critic, lint, displayZh, validation } =
+      const images = isImageEvidence(evidence)
+        ? evidence.images.map((i) => safePath(snapshot + "/" + i.modelPath))
+        : await visualInputs(snapshot);
+      const { analysis, ios, critic, displayZh, validation } =
         await generateDocuments({
           taskId: id,
           versionId: task.version_id,
@@ -106,12 +127,9 @@ export async function processTask(id: string, provider?: DesignModelProvider) {
         task.version_id,
         JSON.stringify(analysis),
       ]);
-      await putJSON(version + "/ios-analysis.json", ios);
+      if (ios) await putJSON(version + "/ios-analysis.json", ios);
       await putJSON(version + "/critic.json", critic);
-      await put(version + "/DESIGN.md", renderDesign(evidence, analysis!));
-      await put(version + "/IOS_design.md", renderIOS(ios!));
-      const ready = eligible(critic!, lint!.valid, true);
-      const quality = ready ? "QUALIFIED" : "LOW_CONFIDENCE";
+      const quality = "SCORED";
       const [meta] = await sql("SELECT metadata FROM versions WHERE id=$1", [
         task.version_id,
       ]);
@@ -122,6 +140,8 @@ export async function processTask(id: string, provider?: DesignModelProvider) {
         presentationLanguage: "zh-CN",
         validation,
         quality,
+        scoringMethod: critic.method,
+        officialLint: "disabled",
       });
       await stage("PUBLISHING");
       await connection.query("BEGIN");
@@ -149,19 +169,20 @@ export async function processTask(id: string, provider?: DesignModelProvider) {
           JSON.stringify({
             language: "en",
             presentationLanguage: "zh-CN",
-            pipeline: "1.1.0",
-            prompt: "2.0",
+            pipeline: "1.3.0",
+            officialLint: "disabled",
+            scoringMethod: critic.method,
+            prompt: "3.0",
           }),
         ],
       );
-      if (ready)
-        await connection.query(
-          "UPDATE designs SET default_version_id=$2 WHERE id=$1 AND (default_version_id IS NULL OR (SELECT created_at FROM versions WHERE id=default_version_id)<(SELECT created_at FROM versions WHERE id=$2))",
-          [task.design_id, task.version_id],
-        );
+      await connection.query(
+        "UPDATE designs SET default_version_id=$2 WHERE id=$1 AND (default_version_id IS NULL OR (SELECT created_at FROM versions WHERE id=default_version_id)<(SELECT created_at FROM versions WHERE id=$2))",
+        [task.design_id, task.version_id],
+      );
       await connection.query(
         "UPDATE tasks SET status=$2,stage='COMPLETE',finished_at=now(),error=NULL WHERE id=$1",
-        [id, ready ? "READY" : "PARTIAL"],
+        [id, "READY"],
       );
       await connection.query("COMMIT");
     } catch (error) {
@@ -173,6 +194,129 @@ export async function processTask(id: string, provider?: DesignModelProvider) {
               "PIPELINE_FAILED",
               "处理失败，已完成的资产保留，可重试当前阶段。",
             );
+      if (task.kind === "PRESENTATION") {
+        const status =
+          e.code === "CANCELED"
+            ? "CANCELED"
+            : e.code === "AUTH_REQUIRED"
+              ? "WAITING_AUTH"
+              : e.code === "QUOTA_EXHAUSTED"
+                ? "WAITING_QUOTA"
+                : "FAILED";
+        await sql(
+          "UPDATE tasks SET status=$2,error=$3,finished_at=now() WHERE id=$1 AND control_revision=$4",
+          [
+            id,
+            status,
+            JSON.stringify({ code: e.code, message: e.message }),
+            task.control_revision,
+          ],
+        );
+        await sql(
+          "UPDATE versions SET presentation_state=$2 WHERE id=$1 AND presentation_state->>'runId'=$3",
+          [
+            task.version_id,
+            JSON.stringify({ status, message: e.message, runId: id }),
+            id,
+          ],
+        );
+        return;
+      }
+      // Scoring is independent of completion, cancellation and provider availability.
+      const read = async (name: string) => {
+        try {
+          return await getJSON(version + "/" + name);
+        } catch {
+          return undefined;
+        }
+      };
+      const markdown = await get(version + "/DESIGN.md")
+        .then((b) => b.toString())
+        .catch(() => "");
+      const prior = await read("critic.json");
+      const score =
+        CriticSchema.safeParse(prior).success &&
+        prior.method !== "deterministic-completeness-v1"
+          ? prior
+          : fallbackQuality({
+              analysis: await read("analysis.json"),
+              ios: await read("ios-analysis.json"),
+              evidence: await getJSON<Evidence>(
+                snapshot + "/evidence.json",
+              ).catch(() => undefined),
+              markdown,
+              reason: e.message,
+            });
+      await connection.query("BEGIN");
+      const current = (
+        await connection.query(
+          "SELECT control_revision,manual_status,cancel_requested FROM tasks WHERE id=$1 FOR UPDATE",
+          [id],
+        )
+      ).rows[0];
+      if (
+        !current ||
+        current.control_revision !== task.control_revision ||
+        current.manual_status
+      ) {
+        await connection.query("ROLLBACK");
+        return;
+      }
+      await putJSON(version + "/critic.json", score);
+      await connection.query(
+        "UPDATE versions SET score=$2,quality='SCORED',metadata=metadata||$3::jsonb WHERE id=$1",
+        [
+          task.version_id,
+          score.score,
+          JSON.stringify({
+            scoringMethod: score.method,
+            officialLint: "disabled",
+          }),
+        ],
+      );
+      if (
+        markdown.trim() &&
+        !current.cancel_requested &&
+        !controller.signal.aborted &&
+        e.code !== "CANCELED"
+      ) {
+        const validation = {
+          advisory: true,
+          valid: false,
+          officialLint: "disabled",
+          issues: [{ path: "pipeline", message: e.message }],
+        };
+        await putJSON(version + "/validation.json", validation);
+        await connection.query(
+          "UPDATE versions SET validation=$2 WHERE id=$1",
+          [task.version_id, JSON.stringify(validation)],
+        );
+        await manifest(version, {
+          quality: "SCORED",
+          scoringMethod: score.method,
+          validation,
+        });
+        await connection.query(
+          "UPDATE tasks SET status='READY',stage='COMPLETE',finished_at=now(),retry_at=NULL,error=NULL,events=events||$2::jsonb WHERE id=$1",
+          [
+            id,
+            JSON.stringify([
+              {
+                stage: "CONTENT_CHECK_FAILED",
+                issues: validation.issues,
+                time: new Date().toISOString(),
+              },
+            ]),
+          ],
+        );
+        await connection.query(
+          "UPDATE designs SET default_version_id=$2 WHERE id=$1 AND (default_version_id IS NULL OR (SELECT created_at FROM versions WHERE id=default_version_id)<(SELECT created_at FROM versions WHERE id=$2))",
+          [task.design_id, task.version_id],
+        );
+        await connection.query("COMMIT");
+        return;
+      }
+      await connection.query("COMMIT");
       const status =
         controller.signal.aborted || e.code === "CANCELED"
           ? "CANCELED"

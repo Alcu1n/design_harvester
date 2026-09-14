@@ -22,8 +22,8 @@ services:
     image: embed:worker
     user: "1000:1000"
     setup_script: |
-      mkdir -p /data/library /auth
-      chown -R 1000:1000 /data/library /auth
+      mkdir -p /data/library /data/imports /auth
+      chown -R 1000:1000 /data/library /data/imports /auth
       chmod 700 /auth
     environment:
       DATABASE_URL: 'postgres://harvester:{{ stable_secret "database" | sha256sum }}@postgres:5432/harvester'
@@ -31,6 +31,7 @@ services:
       DEEPSEEK_API_KEY_FILE: /auth/deepseek_api
       MODEL_PROVIDER: antigravity-cli
       LIBRARY_PATH: /data/library
+      IMPORT_PATH: /data/imports
       GEMINI_AUTH_HOME: /auth
       AGY_AUTH_HOME: /auth/antigravity
       AGY_BIN: /usr/local/bin/agy
@@ -38,6 +39,7 @@ services:
       HOME: /home/node
     binds:
       - /lzcapp/var/library:/data/library
+      - /lzcapp/var/imports:/data/imports
       - /lzcapp/var/auth:/auth
     depends_on: [postgres, browser]
     healthcheck:
@@ -54,9 +56,11 @@ services:
       HOSTNAME: 0.0.0.0
       DATABASE_URL: 'postgres://harvester:{{ stable_secret "database" | sha256sum }}@postgres:5432/harvester'
       LIBRARY_PATH: /data/library
+      IMPORT_PATH: /data/imports
       APP_ORIGIN: https://${LAZYCAT_APP_DOMAIN}
     binds:
       - /lzcapp/var/library:/data/library
+      - /lzcapp/var/imports:/data/imports
     depends_on: [worker]
     healthcheck:
       test: [CMD, node, -e, "fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]

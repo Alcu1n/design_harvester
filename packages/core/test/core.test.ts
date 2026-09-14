@@ -7,7 +7,6 @@ import {
   sameOrigin,
 } from "../src/security.ts";
 import {
-  eligible,
   AnalysisSchema,
   IOSSchema,
   iosSections,
@@ -15,7 +14,6 @@ import {
 } from "../src/contracts.ts";
 import {
   renderDesign,
-  lintDesign,
   validateAnalysis,
   tokens,
 } from "../src/render.ts";
@@ -71,42 +69,16 @@ test("mutations require exact origin", () => {
     }),
   );
 });
-test("renderer uses observed typography and official linter", () => {
+test("renderer preserves observed typography and evidence references", () => {
   const md = renderDesign(evidence, analysis);
   assert.match(md, /fontSize: 64px/);
   assert.match(md, /fontFamily: Georgia/);
-  const report = lintDesign(md);
-  assert.equal(report.valid, true, JSON.stringify(report.findings));
   assert.equal(validateAnalysis(evidence, analysis), true);
   assert.equal(
     validateAnalysis(evidence, {
       ...analysis,
       signatureTraits: [{ description: "wrong", evidenceIds: ["invented"] }],
     }),
-    false,
-  );
-});
-test("quality gate requires complete valid version with no error", () => {
-  const c = {
-    score: 90,
-    subscores: {
-      evidenceAccuracy: 90,
-      visualFidelity: 90,
-      designAbstraction: 90,
-      responsiveUnderstanding: 90,
-      iosAdaptation: 90,
-    },
-    issues: [],
-  };
-  assert.equal(eligible(c, true, true), true);
-  assert.equal(eligible(c, false, true), false);
-  assert.equal(eligible({ ...c, score: 84 }, true, true), false);
-  assert.equal(
-    eligible(
-      { ...c, issues: [{ severity: "error", message: "hallucination" }] },
-      true,
-      true,
-    ),
     false,
   );
 });

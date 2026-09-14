@@ -30,6 +30,10 @@ services:
         source: /lzcsys/data/appvar/local.alcuin.design-harvester/library
         target: /data/library
         read_only: true
+      - type: bind
+        source: /lzcsys/data/appvar/local.alcuin.design-harvester/imports
+        target: /data/imports
+        read_only: false
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
   worker:

@@ -1,3 +1,4 @@
+import {cleanupImports} from "../../../packages/core/src/image-import.ts";
 import { getModelConfig } from "../../../packages/core/src/model-settings.ts";
 import {
   providerAuthReady,
@@ -52,6 +53,7 @@ async function dispatch() {
         ]);
     }
     await flushDeletions();
+    await cleanupImports();
     const config = await getModelConfig();
     await putJSON(".system/auth.json", {
       cached: await providerAuthReady(config),

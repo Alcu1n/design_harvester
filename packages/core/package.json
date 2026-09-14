@@ -10,7 +10,6 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@google/design.md": "0.4.0",
     "@google/gemini-cli": "0.59.0",
     "drizzle-orm": "0.44.7",
     "ipaddr.js": "2.3.0",

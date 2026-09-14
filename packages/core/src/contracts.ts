@@ -30,7 +30,7 @@ export const ElementEvidence = z.object({
   }),
   styles: z.record(z.string(), z.string()),
 });
-export const EvidenceSchema = z.object({
+const WebEvidenceSchema = z.object({
   schemaVersion: z.literal("1.0"),
   source: z.object({
     url: z.string(),
@@ -53,6 +53,38 @@ export const EvidenceSchema = z.object({
   ),
   warnings: z.array(z.string()),
 });
+export const ImageEvidenceSchema = WebEvidenceSchema.extend({
+  kind: z.literal("images"),
+  viewports: WebEvidenceSchema.shape.viewports.max(0),
+  context: z.string().default(""),
+  images: z
+    .array(
+      z.object({
+        id: z.string(),
+        name: z.string(),
+        path: z.string(),
+        preview: z.string(),
+        modelPath: z.string(),
+        width: z.number().int().positive(),
+        height: z.number().int().positive(),
+        sha256: z.string(),
+      }),
+    )
+    .min(1)
+    .max(10),
+});
+export const EvidenceSchema = z.union([
+  ImageEvidenceSchema,
+  WebEvidenceSchema.extend({ kind: z.literal("website").optional() }),
+]);
+export const isImageEvidence = (
+  e: Evidence,
+): e is z.infer<typeof ImageEvidenceSchema> =>
+  "kind" in e && e.kind === "images";
+export const evidenceIds = (e: Evidence) =>
+  isImageEvidence(e)
+    ? e.images.map((i) => i.id)
+    : e.viewports.flatMap((v) => v.elements.map((x) => x.id));
 export type Evidence = z.infer<typeof EvidenceSchema>;
 const prose = z.string().min(4).max(12000);
 const trait = z.object({
@@ -61,6 +93,20 @@ const trait = z.object({
 });
 export const AnalysisSchema = z.object({
   name: z.string().min(1).max(120),
+  overview: prose.optional(),
+  visualEstimates: z
+    .object({
+      colors: z
+        .array(
+          z.object({
+            value: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+            role: prose,
+          }),
+        )
+        .max(12),
+      fontStyle: prose,
+    })
+    .optional(),
   evidenceWarnings: z.array(prose).default([]),
   summary: prose,
   tags: z.array(z.string().max(40)).min(1).max(8),
@@ -146,11 +192,3 @@ export const UpdateSchema = z.object({
   notes: z.string().max(10000).optional(),
   tags: z.array(z.string().trim().min(1).max(40)).max(30).optional(),
 });
-export function eligible(c: Critic, valid: boolean, complete: boolean) {
-  return (
-    complete &&
-    valid &&
-    c.score >= 85 &&
-    !c.issues.some((i) => i.severity === "error")
-  );
-}

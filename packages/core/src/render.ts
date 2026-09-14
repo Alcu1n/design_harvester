@@ -1,7 +1,8 @@
 import { stringify } from "yaml";
-import { lint } from "@google/design.md/linter";
 import {
   iosSections,
+  isImageEvidence,
+  evidenceIds,
   type Evidence,
   type Analysis,
   type IOSAnalysis,
@@ -86,6 +87,7 @@ export function tokens(e: Evidence) {
     typography: Record<string, unknown> = {},
     spacing: Record<string, string> = {},
     rounded: Record<string, string> = {};
+  if (!desktop) return { colors, typography, spacing, rounded };
   const colorValues = [
     ...new Set(
       desktop.elements
@@ -144,7 +146,7 @@ export function tokens(e: Evidence) {
   return { colors, typography, spacing, rounded };
 }
 export function validateAnalysis(e: Evidence, a: Analysis) {
-  const ids = new Set(e.viewports.flatMap((v) => v.elements.map((x) => x.id)));
+  const ids = new Set(evidenceIds(e));
   return a.signatureTraits.every((t) =>
     t.evidenceIds.every((id) => ids.has(id)),
   );
@@ -168,17 +170,26 @@ export function renderDesign(e: Evidence, a: Analysis) {
     })),
   };
   const t = tokens(e);
-  return `---\n${stringify({ version: "alpha", name: a.name, ...t })}---\n\n## Overview\n\n${a.philosophy}\n\n${a.summary}\n\n### Signature Traits\n\n${a.signatureTraits.map((t) => `- ${t.description} (evidence: ${t.evidenceIds.join(", ")})`).join("\n")}\n\n## Colors\n\n${a.colorStrategy}\n\n${Object.entries(
+  const imageSource = isImageEvidence(e);
+  const sourceNote = imageSource
+    ? `Source: Uploaded images (${e.images.map((i) => i.id).join(", ")})\n\nImage-based observations are visual estimates, not computed CSS values. Font identities, dimensions and colors cannot be verified from pixels alone. Interaction, motion and responsive behavior not shown in the supplied images are unknown. Native behavior and implementation values below are proposals.`
+    : `Source: ${e.source.url}\n\nCaptured: ${e.source.capturedAt}\n\nTokens record computed browser styles from the desktop viewport. They are observations, not universal semantic rules. Font families are CSS declarations and do not prove which font rendered every glyph.`;
+  const colorNotes = imageSource
+    ? (a.visualEstimates?.colors ?? [])
+        .map((c) => `- ${c.role}: approximately ${c.value} (visual estimate)`)
+        .join("\n")
+    : "";
+  return `---\n${stringify({ version: "alpha", name: a.name, ...(imageSource ? {} : t) })}---\n\n## Overview\n\n${a.overview || a.philosophy}\n\n### Signature Traits\n\n${a.signatureTraits.map((t) => `- ${t.description} (evidence: ${t.evidenceIds.join(", ")})`).join("\n")}\n\n## Colors\n\n${a.colorStrategy}\n\n${colorNotes}\n\n${Object.entries(
     t.colors,
   )
     .map(([k, v]) => `- ${k}: ${v}`)
     .join(
       "\n",
-    )}\n\n## Typography\n\n${a.typographyStrategy}\n\n## Layout\n\n${a.layoutStrategy}\n\n### Spacing\n\n${a.spacingStrategy}\n\n### Responsive Behavior\n\n${a.responsiveStrategy}\n\n## Elevation & Depth\n\n${a.surfaceStrategy}\n\n## Shapes\n\n${a.shapeStrategy}\n\n## Components\n\n${a.componentStrategy}\n\n### Motion\n\n${a.motionStrategy}\n\n## Do's and Don'ts\n\n### Do\n\n${a.do.map((x) => "- " + x).join("\n")}\n\n### Don't\n\n${a.dont.map((x) => "- " + x).join("\n")}\n\n### Evidence & limitations\n\nSource: ${e.source.url}\n\nCaptured: ${e.source.capturedAt}\n\nTokens record computed browser styles from the desktop viewport, including fractional and viewport-dependent values. They are observations, not universal semantic spacing rules. Consult the layout discussion and viewport evidence before adapting them to native interfaces. Semantic names and design interpretations are inferred. Font families are CSS declarations and do not prove which font rendered every glyph.\n\n${a.evidenceWarnings.map((w) => "- " + prose(w)).join("\n")}\n`;
+    )}\n\n## Typography\n\n${a.typographyStrategy}${imageSource && a.visualEstimates?.fontStyle ? `\n\nVisual font-style estimate: ${a.visualEstimates.fontStyle}` : ""}\n\n## Layout\n\n${a.layoutStrategy}\n\n### Spacing\n\n${a.spacingStrategy}\n\n### Responsive Behavior\n\n${a.responsiveStrategy}\n\n## Elevation & Depth\n\n${a.surfaceStrategy}\n\n## Shapes\n\n${a.shapeStrategy}\n\n## Components\n\n${a.componentStrategy}\n\n### Motion\n\n${a.motionStrategy}\n\n## Do's and Don'ts\n\n### Do\n\n${a.do.map((x) => "- " + x).join("\n")}\n\n### Don't\n\n${a.dont.map((x) => "- " + x).join("\n")}\n\n### Evidence & limitations\n\n${sourceNote}\n\n${a.evidenceWarnings.map((w) => "- " + prose(w)).join("\n")}\n`;
 }
-export function renderIOS(a: IOSAnalysis) {
+export function renderIOS(a: IOSAnalysis, imageSource = false) {
   return (
-    "# iOS Design Adaptation\n\nThis document proposes an Apple-native adaptation of the observed web design. It does not describe observed iOS behavior. Target iOS 17 or later; APIs requiring newer systems must state their availability and provide alternatives.\n\n" +
+    `# iOS Design Adaptation\n\nThis document proposes an Apple-native adaptation of the ${imageSource ? "supplied interface images" : "observed web design"}. Static images do not establish runtime behavior. Target iOS 17 or later; APIs requiring newer systems must state their availability and provide alternatives.\n\n` +
     iosSections
       .map(
         (h) =>
@@ -187,22 +198,6 @@ export function renderIOS(a: IOSAnalysis) {
       .join("\n\n") +
     "\n"
   );
-}
-export function lintDesign(markdown: string) {
-  try {
-    const r = lint(markdown);
-    return {
-      valid: r.summary.errors === 0,
-      summary: r.summary,
-      findings: r.findings,
-    };
-  } catch {
-    return {
-      valid: false,
-      summary: { errors: 1, warnings: 0, infos: 0 },
-      findings: [{ message: "DESIGN.md 无法解析", severity: "error" }],
-    };
-  }
 }
 export function tokenDiff(a: Evidence, b: Evidence) {
   const left = tokens(a),

@@ -9,6 +9,7 @@ const env = {
     process.env.TEST_DATABASE_URL ||
     "postgresql://harvester:harvester@127.0.0.1:5432/harvester_test",
   LIBRARY_PATH: temporary,
+  IMPORT_PATH: path.join(temporary, "imports"),
   INTEGRATION: "1",
 };
 try {

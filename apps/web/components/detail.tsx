@@ -19,6 +19,7 @@ import { api, labels } from "./library";
 import { Button } from "./button";
 import { DownloadButton } from "./download-button";
 import { presentation } from "./presentation";
+import { QualityDetails } from "./quality-details";
 import { InspectorScroll } from "./inspector-scroll";
 const stages: Record<string, string> = {
   QUEUED: "等待开始",
@@ -28,7 +29,8 @@ const stages: Record<string, string> = {
   ANALYZING_DESIGN: "理解设计语言",
   GENERATING_DESIGN_MD: "生成 DESIGN.md",
   ADAPTING_IOS: "适配 iOS",
-  QUALITY_REVIEW: "质量检查",
+  QUALITY_REVIEW: "质量评分",
+  IMPORTING_IMAGES: "归档设计图片",
   VALIDATING_ENGLISH: "正在校验英文文档",
   TRANSLATING_DESIGN_DNA: "正在翻译中文介绍",
   VALIDATING_TRANSLATION: "正在校验中文介绍",
@@ -157,13 +159,29 @@ export function Detail({ id }: { id: string }) {
       alive = false;
     };
   }, [compare, version?.id, id]);
-  const task = data?.tasks[0];
+  const task = data?.tasks.find((t: any) => t.kind !== "PRESENTATION");
   const selectedTask = data?.tasks.find(
-    (t: any) => t.version_id === version?.id,
+    (t: any) => t.version_id === version?.id && t.kind !== "PRESENTATION",
   );
   const base = `/api/assets/${id}/versions/${version?.id}/`,
     snap = `/api/assets/${id}/snapshots/${version?.snapshot_id}/`;
   const analysis = presentation(version);
+  const imageSource = data?.source_kind === "images";
+  const sourceName = imageSource
+    ? "图片设计"
+    : data?.canonical_url
+      ? new URL(data.canonical_url).hostname
+      : "设计";
+  const selectedImage =
+    evidence?.images?.find((i: any) => i.id === viewport) ||
+    evidence?.images?.[0];
+  const screenshotPath = imageSource
+    ? selectedImage?.preview
+    : `screenshots/${viewport}.png`;
+  const originalPath = imageSource
+    ? selectedImage?.path
+    : `screenshots/${viewport}.png`;
+
   useEffect(() => {
     if (!version) return;
     let alive = true;
@@ -191,7 +209,7 @@ export function Detail({ id }: { id: string }) {
     setBusy(true);
     try {
       await api("designs/" + id, "PATCH", {
-        title: title || new URL(data.canonical_url).hostname,
+        title: title || sourceName,
         notes,
         tags: tags
           .split(/[,，]/)
@@ -215,29 +233,33 @@ export function Detail({ id }: { id: string }) {
       </Link>
       <div className="detail-title">
         <div>
-          <p className="eyebrow">{new URL(data.canonical_url).hostname}</p>
-          <h1>
-            {data.title ||
-              analysis?.name ||
-              new URL(data.canonical_url).hostname}
-          </h1>
-          <a
-            className="source-link"
-            href={data.canonical_url}
-            target="_blank"
-            rel="noreferrer"
-          >
-            访问原网站 <ExternalLink size={13} />
-          </a>
+          <p className="eyebrow">{sourceName}</p>
+          <h1>{data.title || analysis?.name || sourceName}</h1>
+          {!imageSource && (
+            <a
+              className="source-link"
+              href={data.canonical_url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              访问原网站 <ExternalLink size={13} />
+            </a>
+          )}
         </div>
         <div className="actions">
           <Button
             variant="secondary"
             disabled={busy}
-            onClick={() => action("designs/" + id + "/harvest")}
+            onClick={() =>
+              action(
+                imageSource
+                  ? `harvest-runs/${selectedTask?.id}/regenerate`
+                  : "designs/" + id + "/harvest",
+              )
+            }
           >
             <RefreshCw size={15} />
-            重新采集
+            {imageSource ? "重新生成" : "重新采集"}
           </Button>
           {version && (
             <DownloadButton
@@ -274,7 +296,7 @@ export function Detail({ id }: { id: string }) {
             </strong>
             <p>
               {(task.manual_status
-                ? "原始校验结论与已保存文件保持不变。"
+                ? "内容检查记录与已保存文件保持不变。"
                 : task.error?.message) ||
                 (task.status === "PARTIAL"
                   ? "结果已保留，但未达到完整合格标准。"
@@ -345,12 +367,12 @@ export function Detail({ id }: { id: string }) {
             </select>
           </label>
           <p className="muted">
-            手动标记会停止当前任务，保留已保存文件与校验结论。
+            手动标记会停止当前任务，保留已保存文件与评分记录。
           </p>
           {task.manual_status && (
             <p role="status">
               已手动标记为{labels[task.manual_status.status]}
-              ；此标记不代表文档通过校验。
+              ；此标记不会改变质量评分。
             </p>
           )}
         </div>
@@ -363,17 +385,35 @@ export function Detail({ id }: { id: string }) {
               role="tablist"
               aria-label="截图尺寸"
             >
-              {[
-                ["desktop", "桌面"],
-                ["tablet", "平板"],
-                ["mobile", "手机"],
-              ].map(([v, l]) => (
+              {(imageSource
+                ? (evidence?.images || []).map((i: any, index: number) => [
+                    i.id,
+                    `图片 ${index + 1}`,
+                  ])
+                : [
+                    ["desktop", "桌面"],
+                    ["tablet", "平板"],
+                    ["mobile", "手机"],
+                  ]
+              ).map(([v, l]: string[]) => (
                 <button
                   role="tab"
-                  aria-selected={viewport === v}
+                  aria-selected={
+                    imageSource ? selectedImage?.id === v : viewport === v
+                  }
                   key={v}
                   onClick={() => setViewport(v)}
                 >
+                  {imageSource && (
+                    <img
+                      className="image-nav-thumb"
+                      src={
+                        snap +
+                        evidence.images.find((i: any) => i.id === v)?.preview
+                      }
+                      alt=""
+                    />
+                  )}
                   {l}
                 </button>
               ))}
@@ -382,12 +422,19 @@ export function Detail({ id }: { id: string }) {
               <Dialog.Root>
                 <Dialog.Trigger asChild>
                   <button
-                    className={"screenshot " + viewport}
+                    className={
+                      "screenshot " +
+                      (imageSource ? "uploaded-image" : viewport)
+                    }
                     aria-label="放大完整截图"
                   >
                     <img
-                      src={snap + `screenshots/${viewport}.png`}
-                      alt={`${data.title || "网站"}的${viewport}完整截图`}
+                      src={screenshotPath ? snap + screenshotPath : undefined}
+                      alt={
+                        imageSource
+                          ? selectedImage?.name || "设计图片"
+                          : `${data.title || "网站"}的${viewport}完整截图`
+                      }
                       onError={(e) => {
                         e.currentTarget.style.visibility = "hidden";
                       }}
@@ -405,16 +452,16 @@ export function Detail({ id }: { id: string }) {
                   <Dialog.Overlay className="dialog-overlay" />
                   <Dialog.Content className="image-dialog">
                     <Dialog.Title className="sr-only">
-                      完整网页截图
+                      完整设计截图
                     </Dialog.Title>
                     <Dialog.Description className="sr-only">
-                      滚动查看完整网页，按 Escape 关闭。
+                      滚动查看完整图片，按 Escape 关闭。
                     </Dialog.Description>
                     <Dialog.Close className="image-close" aria-label="关闭截图">
                       <X />
                     </Dialog.Close>
                     <img
-                      src={snap + `screenshots/${viewport}.png`}
+                      src={originalPath ? snap + originalPath : undefined}
                       alt="完整网页"
                     />
                   </Dialog.Content>
@@ -432,6 +479,35 @@ export function Detail({ id }: { id: string }) {
               <p>
                 {analysis?.summary || "完成分析后，这里会呈现设计的核心特征。"}
               </p>
+              {!analysis && version.analysis && (
+                <div className="dna-recovery">
+                  <p>
+                    {version.presentation_state?.message ||
+                      "中文介绍尚未生成，可单独补生成。"}
+                  </p>
+                  <Button
+                    variant="secondary"
+                    disabled={
+                      busy ||
+                      ["QUEUED", "RUNNING"].includes(
+                        version.presentation_state?.status,
+                      ) ||
+                      ["QUEUED", "RUNNING"].includes(selectedTask?.status)
+                    }
+                    onClick={() =>
+                      action(
+                        `designs/${id}/versions/${version.id}/presentation`,
+                      )
+                    }
+                  >
+                    {["QUEUED", "RUNNING"].includes(
+                      version.presentation_state?.status,
+                    )
+                      ? "正在生成中文介绍…"
+                      : "补生成中文介绍"}
+                  </Button>
+                </div>
+              )}
               <div className="tags">
                 {[
                   ...new Set([...(data.tags || []), ...(analysis?.tags || [])]),
@@ -448,14 +524,20 @@ export function Detail({ id }: { id: string }) {
                 ))}
               </div>
               <div className="inspector-block">
-                <h3>实测色彩</h3>
+                <h3>{imageSource ? "参考配色（视觉推断）" : "实测色彩"}</h3>
                 <div className="swatches">
                   {[
                     ...new Set<string>(
-                      evidence?.viewports?.[0]?.elements?.flatMap((e: any) => [
-                        e.styles.color,
-                        e.styles["background-color"],
-                      ]) || [],
+                      imageSource
+                        ? (version.analysis?.visualEstimates?.colors || []).map(
+                            (c: any) => c.value,
+                          )
+                        : evidence?.viewports?.[0]?.elements?.flatMap(
+                            (e: any) => [
+                              e.styles.color,
+                              e.styles["background-color"],
+                            ],
+                          ) || [],
                     ),
                   ]
                     .filter((c) => c && c !== "rgba(0, 0, 0, 0)")
@@ -471,12 +553,17 @@ export function Detail({ id }: { id: string }) {
                 </div>
               </div>
               <div className="inspector-block">
-                <h3>字体声明</h3>
+                <h3>{imageSource ? "字体风格推断" : "字体声明"}</h3>
                 {[
                   ...new Set<string>(
-                    evidence?.viewports?.[0]?.elements?.map(
-                      (e: any) => e.styles["font-family"],
-                    ) || [],
+                    imageSource
+                      ? [
+                          analysis?.visualFontStyle ||
+                            "图片无法确认真实字体名称。字体风格与实现建议见文档 Typography 部分。",
+                        ]
+                      : evidence?.viewports?.[0]?.elements?.map(
+                          (e: any) => e.styles["font-family"],
+                        ) || [],
                   ),
                 ]
                   .slice(0, 5)
@@ -491,34 +578,29 @@ export function Detail({ id }: { id: string }) {
                   <small> / 100</small>
                 </strong>
                 <span>
-                  {version.quality === "QUALIFIED"
-                    ? "已通过检查"
-                    : version.quality === "LOW_CONFIDENCE"
-                      ? "低置信度"
-                      : "尚未完成检查"}
+                  {version.score != null
+                    ? version.metadata?.scoringMethod ===
+                      "deterministic-completeness-v1"
+                      ? "完整度参考分 · 未做语义审核"
+                      : "模型质量评分 · 仅供参考"
+                    : version.quality === "QUALIFIED"
+                      ? "已通过检查"
+                      : version.quality === "LOW_CONFIDENCE"
+                        ? "低置信度"
+                        : "尚未完成检查"}
                 </span>
               </div>
+              <QualityDetails
+                key={version.id}
+                imageSource={imageSource}
+                url={
+                  version.metadata?.scoringReport
+                    ? `/api/assets/${version.metadata.scoringReport}`
+                    : base + "critic.json"
+                }
+              />
             </InspectorScroll>
           </div>
-          {version.validation && !version.validation.valid && (
-            <div className="notice" role="status">
-              <p>已生成，未通过规范或语言校验。当前文件为待修复候选。</p>
-              {version.validation.issues?.map((issue: any, i: number) => (
-                <p key={i}>
-                  {issue.path}：{issue.message}
-                </p>
-              ))}
-              {version.validation.report && (
-                <DownloadButton
-                  variant="ghost"
-                  url={`/api/assets/${version.validation.report}?download`}
-                  filename="validation-report.json"
-                >
-                  下载检查报告
-                </DownloadButton>
-              )}
-            </div>
-          )}
           <div className="document-tabs tabs">
             {["DESIGN.md", "IOS_design.md"].map((n) => (
               <button
@@ -594,7 +676,9 @@ export function Detail({ id }: { id: string }) {
       <section className="detail-section">
         <h2>版本历史</h2>
         <p className="muted">
-          默认使用最新合格版本。重新生成沿用已有证据，重新采集才访问网站。
+          {imageSource
+            ? "默认使用最新生成成功的版本。重新生成沿用上传图片。"
+            : "默认使用最新生成成功的版本。重新生成沿用已有证据，重新采集才访问网站。"}
         </p>
         <div className="version-list">
           {data.versions.map((v: any, i: number) => (
@@ -609,16 +693,20 @@ export function Detail({ id }: { id: string }) {
                 {data.tasks.find((t: any) => t.version_id === v.id)?.kind ===
                 "REGENERATE"
                   ? "重新生成"
-                  : "网站采集"}
+                  : imageSource
+                    ? "图片导入"
+                    : "网站采集"}
               </span>
               <span>
                 {v.id === data.default_version_id
                   ? "默认版本"
-                  : v.quality === "QUALIFIED"
-                    ? "合格"
-                    : v.quality === "LOW_CONFIDENCE"
-                      ? "低置信度"
-                      : "未完成"}
+                  : v.quality === "SCORED"
+                    ? "已评分"
+                    : v.quality === "QUALIFIED"
+                      ? "合格"
+                      : v.quality === "LOW_CONFIDENCE"
+                        ? "低置信度"
+                        : "未完成"}
               </span>
             </button>
           ))}
@@ -657,11 +745,16 @@ export function Detail({ id }: { id: string }) {
               <>
                 <div className="compare-images">
                   <img
-                    src={snap + "screenshots/desktop.webp"}
+                    src={
+                      snap +
+                      (imageSource
+                        ? "images/preview-1.webp"
+                        : "screenshots/desktop.webp")
+                    }
                     alt="当前版本截图"
                   />
                   <img
-                    src={`/api/assets/${id}/snapshots/${data.versions.find((v: any) => v.id === compare)?.snapshot_id}/screenshots/desktop.webp`}
+                    src={`/api/assets/${id}/snapshots/${data.versions.find((v: any) => v.id === compare)?.snapshot_id}/${imageSource ? "images/preview-1.webp" : "screenshots/desktop.webp"}`}
                     alt="对比版本截图"
                   />
                 </div>
@@ -677,7 +770,9 @@ export function Detail({ id }: { id: string }) {
         )}
       </section>
       <details className="detail-section">
-        <summary>浏览器证据与质量记录</summary>
+        <summary>
+          {imageSource ? "图片证据与质量记录" : "浏览器证据与质量记录"}
+        </summary>
         {evidence ? (
           <>
             <p className="muted">
@@ -722,7 +817,11 @@ export function Detail({ id }: { id: string }) {
               <DownloadButton
                 key={base + "critic.json"}
                 variant="ghost"
-                url={base + "critic.json?download"}
+                url={
+                  version.metadata?.scoringReport
+                    ? `/api/assets/${version.metadata.scoringReport}?download`
+                    : base + "critic.json?download"
+                }
                 filename="critic.json"
               >
                 下载质检记录
@@ -738,7 +837,7 @@ export function Detail({ id }: { id: string }) {
             </div>
           </>
         ) : (
-          <p>证据尚未采集完成。</p>
+          <p>{imageSource ? "图片证据尚未归档。" : "证据尚未采集完成。"}</p>
         )}
       </details>
       <details className="detail-section">

@@ -5,6 +5,11 @@ CREATE TABLE IF NOT EXISTS designs(id uuid PRIMARY KEY,canonical_url text UNIQUE
 CREATE TABLE IF NOT EXISTS snapshots(id uuid PRIMARY KEY,design_id uuid NOT NULL REFERENCES designs(id) ON DELETE CASCADE,created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS versions(id uuid PRIMARY KEY,design_id uuid NOT NULL REFERENCES designs(id) ON DELETE CASCADE,snapshot_id uuid NOT NULL REFERENCES snapshots(id),score integer,quality text NOT NULL DEFAULT 'PENDING',metadata jsonb NOT NULL,analysis jsonb,created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS tasks(id uuid PRIMARY KEY,design_id uuid NOT NULL REFERENCES designs(id) ON DELETE CASCADE,snapshot_id uuid NOT NULL,version_id uuid NOT NULL,kind text NOT NULL,status text NOT NULL DEFAULT 'QUEUED',stage text NOT NULL DEFAULT 'QUEUED',error jsonb,attempts integer NOT NULL DEFAULT 0,retry_at timestamptz,dispatched_at timestamptz,heartbeat_at timestamptz,cancel_requested boolean NOT NULL DEFAULT false,events jsonb NOT NULL DEFAULT '[]',created_at timestamptz NOT NULL DEFAULT now(),finished_at timestamptz);
+ALTER TABLE designs ALTER COLUMN canonical_url DROP NOT NULL;
+ALTER TABLE designs ADD COLUMN IF NOT EXISTS source_kind text NOT NULL DEFAULT 'website';
+ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS import_id uuid;
+ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS source_metadata jsonb;
+ALTER TABLE versions ADD COLUMN IF NOT EXISTS presentation_state jsonb;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS repair_state jsonb;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS manual_status jsonb;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS control_revision integer NOT NULL DEFAULT 0;

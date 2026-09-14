@@ -3,13 +3,7 @@ const config: NextConfig = {
   output: "standalone",
   devIndicators: false,
   transpilePackages: ["@harvester/core"],
-  serverExternalPackages: [
-    "pg",
-    "pg-boss",
-    "sharp",
-    "playwright",
-    "@google/design.md",
-  ],
+  serverExternalPackages: ["pg", "pg-boss", "sharp", "playwright"],
   outputFileTracingExcludes: {
     "/*": [
       "../../.auth/**/*",

@@ -11,7 +11,7 @@ FROM base AS web-build
 RUN pnpm build
 FROM node:24-bookworm-slim AS web
 WORKDIR /app
-ENV NODE_ENV=production
+ENV NODE_ENV=production IMPORT_PATH=/data/imports
 COPY --from=web-build /app/apps/web/.next/standalone ./
 COPY --from=web-build /app/apps/web/.next/static ./apps/web/.next/static
 USER node
@@ -30,9 +30,9 @@ COPY apps/worker/package.json ./apps/worker/package.json
 COPY apps/worker/src ./apps/worker/src
 COPY lazycat/worker-start.sh ./lazycat/worker-start.sh
 RUN ln -s packages/core/node_modules node_modules \
-    && mkdir -p /data/library /auth /work && chown -R node:node /data /auth /work
+    && mkdir -p /data/library /data/imports /auth /work && chown -R node:node /data /auth /work
 USER node
-ENV LIBRARY_PATH=/data/library GEMINI_AUTH_HOME=/auth AGY_AUTH_HOME=/auth/antigravity AGY_BIN=/usr/local/bin/agy TMPDIR=/work
+ENV IMPORT_PATH=/data/imports LIBRARY_PATH=/data/library GEMINI_AUTH_HOME=/auth AGY_AUTH_HOME=/auth/antigravity AGY_BIN=/usr/local/bin/agy TMPDIR=/work
 CMD ["pnpm","worker"]
 FROM node:24-bookworm-slim AS egress
 WORKDIR /app

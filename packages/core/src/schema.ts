@@ -8,7 +8,8 @@ import {
 } from "drizzle-orm/pg-core";
 export const designs = pgTable("designs", {
   id: uuid().primaryKey(),
-  canonicalUrl: text("canonical_url").notNull().unique(),
+  canonicalUrl: text("canonical_url").unique(),
+  sourceKind: text("source_kind").notNull().default("website"),
   title: text(),
   notes: text().notNull().default(""),
   tags: jsonb().$type<string[]>().notNull().default([]),

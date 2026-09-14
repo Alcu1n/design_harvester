@@ -1,4 +1,10 @@
-import { getModelConfig, saveModelConfig, hasSavedDeepSeekKey } from "@harvester/core/model-settings";
+import { createImageRun } from "@harvester/core/image-import";
+import { queuePresentation } from "@harvester/core/presentation-job";
+import {
+  getModelConfig,
+  saveModelConfig,
+  hasSavedDeepSeekKey,
+} from "@harvester/core/model-settings";
 import { NextRequest } from "next/server";
 import {
   CreateSchema,
@@ -33,6 +39,7 @@ export const dynamic = "force-dynamic";
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const json = (x: unknown, status = 200) =>
   Response.json(x, { status, headers: { "Cache-Control": "no-store" } });
+let uploading = false;
 async function handler(
   req: NextRequest,
   context: { params: Promise<{ path: string[] }> },
@@ -44,6 +51,55 @@ async function handler(
     for (const segment of p)
       if (segment === ".." || segment.includes("\\") || segment.includes("/"))
         throw new HarvestError("NOT_FOUND", "路径不存在。");
+    if (
+      p[0] === "designs" &&
+      p[1] === "images" &&
+      p.length === 2 &&
+      method === "POST"
+    ) {
+      if (uploading)
+        throw new HarvestError("CONFLICT", "正在处理另一批图片，请稍后再试。");
+      uploading = true;
+      try {
+        const reader = req.body?.getReader();
+        if (!reader) throw new HarvestError("UPLOAD_INVALID", "请选择图片。");
+        const chunks: Uint8Array[] = [];
+        let size = 0;
+        try {
+          for (;;) {
+            const part = await reader.read();
+            if (part.done) break;
+            size += part.value.length;
+            if (size > 52 * 1024 * 1024) {
+              await reader.cancel();
+              throw new HarvestError(
+                "UPLOAD_INVALID",
+                "上传内容超过大小限制。",
+              );
+            }
+            chunks.push(part.value);
+          }
+        } finally {
+          reader.releaseLock();
+        }
+        const form = await new Response(Buffer.concat(chunks), {
+          headers: { "Content-Type": req.headers.get("content-type") || "" },
+        }).formData();
+        const images = form.getAll("images");
+        if (images.some((x) => typeof x === "string"))
+          throw new HarvestError("UPLOAD_INVALID", "图片格式无效。");
+        return json(
+          await createImageRun(
+            images as File[],
+            String(form.get("title") || ""),
+            String(form.get("context") || ""),
+          ),
+          202,
+        );
+      } finally {
+        uploading = false;
+      }
+    }
     if (p[1] && ["designs", "harvest-runs"].includes(p[0]) && !uuid.test(p[1]))
       throw new HarvestError("NOT_FOUND", "标识无效。");
     if (p[0] === "designs" && p.length === 1) {
@@ -70,6 +126,14 @@ async function handler(
       }
       if (p[2] === "harvest" && method === "POST")
         return json(await createRun(d.canonical_url, d.id), 202);
+      if (
+        p[2] === "versions" &&
+        uuid.test(p[3] || "") &&
+        p[4] === "presentation" &&
+        p.length === 5 &&
+        method === "POST"
+      )
+        return json(await queuePresentation(d.id, p[3]), 202);
       if (p[2] === "versions" && method === "GET") return json(d.versions);
       if (p[2] === "compare" && method === "GET") {
         const a = d.versions.find(
@@ -123,6 +187,7 @@ async function handler(
                   {
                     id: d.id,
                     url: d.canonical_url,
+                    sourceKind: d.source_kind,
                     title: d.title,
                     notes: d.notes,
                     tags: d.tags,
@@ -155,9 +220,10 @@ async function handler(
       if (method === "POST") {
         if (p[2] === "status") {
           const body = await req.json();
-          if (!["READY","FAILED"].includes(body?.status)) throw new HarvestError("CONFLICT","请选择已完成或失败。");
-          await setTaskStatus(t.id,body.status);
-          return json({ok:true});
+          if (!["READY", "FAILED"].includes(body?.status))
+            throw new HarvestError("CONFLICT", "请选择已完成或失败。");
+          await setTaskStatus(t.id, body.status);
+          return json({ ok: true });
         }
         if (p[2] === "resume") {
           await resume(t.id);
@@ -181,21 +247,30 @@ async function handler(
     if (p[0] === "assets" && method === "GET") {
       if (!uuid.test(p[1] || ""))
         throw new HarvestError("NOT_FOUND", "资产不存在。");
-      await detail(p[1]);
+      const design = await detail(p[1]);
       const key = p.slice(1).join("/");
-      const allowed = /\.(png|webp|json|md)$/i.test(key);
-      if (!allowed || !(await exists(key)))
+      const allowed = /\.(png|jpg|jpeg|webp|json|md)$/i.test(key);
+      const score =
+        p.length === 5 && p[2] === "versions" && p[4] === "quality-score.json"
+          ? design.versions.find((v: any) => v.id === p[3])?.metadata
+              ?.scoringResult
+          : undefined;
+      if (!allowed || (!score && !(await exists(key))))
         throw new HarvestError("NOT_FOUND", "资产尚未生成。");
-      const b = await get(key);
+      const b = score
+        ? Buffer.from(JSON.stringify(score, null, 2))
+        : await get(key);
       const ext = key.split(".").pop();
       const mime =
         ext === "png"
           ? "image/png"
-          : ext === "webp"
-            ? "image/webp"
-            : ext === "json"
-              ? "application/json; charset=utf-8"
-              : "text/plain; charset=utf-8";
+          : ext === "jpg" || ext === "jpeg"
+            ? "image/jpeg"
+            : ext === "webp"
+              ? "image/webp"
+              : ext === "json"
+                ? "application/json; charset=utf-8"
+                : "text/plain; charset=utf-8";
       return new Response(new Uint8Array(b), {
         headers: {
           "Content-Type": mime,
@@ -208,15 +283,30 @@ async function handler(
       });
     }
     if (p[0] === "settings" && p.length === 1) {
-      if (method === "PATCH") return json(await saveModelConfig(await req.json()));
+      if (method === "PATCH")
+        return json(await saveModelConfig(await req.json()));
       if (method === "GET") {
         const config = await getModelConfig();
-        const auth = (await exists(".system/auth.json")) ? await getJSON(".system/auth.json") : {};
+        const auth = (await exists(".system/auth.json"))
+          ? await getJSON(".system/auth.json")
+          : {};
         const savedKey = await hasSavedDeepSeekKey();
-        const connections = { ...auth.connections, deepseek: savedKey || Boolean(auth.connections?.deepseek) };
-        return json({ ...config, connections,
-          authCached: config.provider === "deepseek" ? connections.deepseek : config.provider === auth.provider ? Boolean(auth.cached) : Boolean(connections.gemini),
-          storage: root, bytes: await diskUsage(), paidFallback: false,
+        const connections = {
+          ...auth.connections,
+          deepseek: savedKey || Boolean(auth.connections?.deepseek),
+        };
+        return json({
+          ...config,
+          connections,
+          authCached:
+            config.provider === "deepseek"
+              ? connections.deepseek
+              : config.provider === auth.provider
+                ? Boolean(auth.cached)
+                : Boolean(connections.gemini),
+          storage: root,
+          bytes: await diskUsage(),
+          paidFallback: false,
         });
       }
     }

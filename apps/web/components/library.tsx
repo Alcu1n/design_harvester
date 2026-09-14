@@ -1,4 +1,5 @@
 "use client";
+import { ImageUpload } from "./image-upload";
 import { presentation } from "./presentation";
 import { useEffect, useState } from "react";
 import Link from "next/link";
@@ -45,6 +46,7 @@ export function Library() {
     [error, setError] = useState(""),
     [loading, setLoading] = useState(true),
     [busy, setBusy] = useState(false);
+  const [source, setSource] = useState("website");
   const router = useRouter();
   useEffect(() => {
     let alive = true;
@@ -103,29 +105,51 @@ export function Library() {
             沉淀为随时可用的设计方案。
           </p>
         </div>
-        <form className="harvest-form" onSubmit={harvest}>
-          <label htmlFor="url">收藏一个新设计</label>
-          <div className="url-field">
-            <input
-              id="url"
-              type="url"
-              placeholder="https://你喜欢的网站"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              required
-              aria-label="网站地址"
-            />
-            <Button disabled={busy}>
-              {busy ? (
-                <Loader2 className="spin" size={17} />
-              ) : (
-                <Plus size={17} />
-              )}
-              采集
-            </Button>
+        <div className="source-entry">
+          <div className="tabs" role="tablist" aria-label="设计来源">
+            <button
+              role="tab"
+              aria-selected={source === "website"}
+              onClick={() => setSource("website")}
+            >
+              网站
+            </button>
+            <button
+              role="tab"
+              aria-selected={source === "images"}
+              onClick={() => setSource("images")}
+            >
+              图片
+            </button>
           </div>
-          <p>公开网页 · 三种屏幕尺寸 · 两份设计文档</p>
-        </form>
+          {source === "images" ? (
+            <ImageUpload />
+          ) : (
+            <form className="harvest-form" onSubmit={harvest}>
+              <label htmlFor="url">收藏一个新设计</label>
+              <div className="url-field">
+                <input
+                  id="url"
+                  type="url"
+                  placeholder="https://你喜欢的网站"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  required
+                  aria-label="网站地址"
+                />
+                <Button disabled={busy}>
+                  {busy ? (
+                    <Loader2 className="spin" size={17} />
+                  ) : (
+                    <Plus size={17} />
+                  )}
+                  采集
+                </Button>
+              </div>
+              <p>公开网页 · 三种屏幕尺寸 · 两份设计文档</p>
+            </form>
+          )}
+        </div>
       </section>
       {error && (
         <div className="notice" role="alert">
@@ -201,7 +225,7 @@ export function Library() {
                 <div className="card-image">
                   {d.snapshot_id ? (
                     <img
-                      src={`/api/assets/${d.id}/snapshots/${d.snapshot_id}/screenshots/desktop.webp`}
+                      src={`/api/assets/${d.id}/snapshots/${d.snapshot_id}/${d.source_kind === "images" ? "images/preview-1.webp" : "screenshots/desktop.webp"}`}
                       alt={d.title || presentation(d)?.name || "网站预览"}
                       onError={(e) => {
                         e.currentTarget.style.display = "none";
@@ -211,7 +235,8 @@ export function Library() {
                     <Layers size={32} />
                   )}
                   <span className="card-status">
-                    {labels[d.status] || "待采集"}{d.manual_status ? "（手动）" : ""}
+                    {labels[d.status] || "待采集"}
+                    {d.manual_status ? "（手动）" : ""}
                   </span>
                   <span className="card-open">
                     <ArrowUpRight size={18} />
@@ -221,9 +246,15 @@ export function Library() {
                   <h3>
                     {d.title ||
                       presentation(d)?.name ||
-                      new URL(d.canonical_url).hostname}
+                      (d.source_kind === "images"
+                        ? "图片设计"
+                        : new URL(d.canonical_url).hostname)}
                   </h3>
-                  <span>{new URL(d.canonical_url).hostname}</span>
+                  <span>
+                    {d.source_kind === "images"
+                      ? "图片设计"
+                      : new URL(d.canonical_url).hostname}
+                  </span>
                   <p>
                     {presentation(d)?.summary ||
                       ([

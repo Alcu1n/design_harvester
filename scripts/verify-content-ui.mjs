@@ -36,7 +36,7 @@ const timestamp = "2026-09-14T10:00:00Z";
 let state = "queued";
 let manualStatus = null;
 function fixture() {
-  const ready = state === "ready";
+  const ready = state.startsWith("ready");
   const task = {
     id: "task",
     version_id: "version",
@@ -89,12 +89,12 @@ function fixture() {
     created_at: timestamp,
     analysis: english,
     display_zh: ready ? chinese : null,
-    metadata: { language: "en" },
-    validation: ready
+    metadata: { language: "en", scoringMethod: state === "ready" ? "model-review-v1" : "deterministic-completeness-v1" },
+    validation: state === "ready"
       ? { valid: true, language: "en" }
       : { valid: false, language: "en", issues: [issue], report },
-    quality: ready ? "QUALIFIED" : "PENDING",
-    score: ready ? 95 : null,
+    quality: "SCORED",
+    score: state === "ready" ? 35 : 24,
   };
   return {
     id: "fixture",
@@ -200,6 +200,7 @@ try {
       "translation",
       "failed",
       "ready",
+      "ready-advisory",
     ]) {
       state = next;
       manualStatus = null;
@@ -211,12 +212,17 @@ try {
         .locator(".markdown")
         .getByText("Serif headings establish a clear reading hierarchy.")
         .waitFor();
-      if (state === "ready") {
+      if (state.startsWith("ready")) {
         await page
           .getByRole("heading", { name: chinese.name, exact: true })
           .waitFor();
         assert.equal(await page.locator(".progress-panel").count(), 0);
+        assert.match(await page.locator(".quality").innerText(), state === "ready" ? /35/ : /24/);
+        assert.match(await page.locator(".quality").innerText(), state === "ready" ? /仅供参考/ : /完整度参考分/);
+        await page.locator(".quality").screenshot({path:`output/playwright/quality-${mobile ? "mobile" : "desktop"}-${state}-016.png`});
+        assert.equal(await page.locator(".validation-notice").count(), 0);
       } else {
+        assert.match(await page.locator(".quality").innerText(), /完整度参考分/);
         const expected =
           state === "queued"
             ? "2/5"
@@ -237,11 +243,7 @@ try {
           0,
           "English candidate must not leak into Chinese DNA",
         );
-        await page
-          .getByText("已生成，未通过规范或语言校验。当前文件为待修复候选。", {
-            exact: true,
-          })
-          .waitFor();
+        assert.equal(await page.locator(".validation-notice").count(), 0);
       }
       assert.equal(
         await page.evaluate(
@@ -251,7 +253,7 @@ try {
         "No horizontal overflow",
       );
       await page.screenshot({
-        path: `output/playwright/content-${mobile ? "mobile" : "desktop"}-${state}-014.png`,
+        path: `output/playwright/content-${mobile ? "mobile" : "desktop"}-${state}-016.png`,
       });
       if (state === "failed") {
         await page.getByText("任务记录", { exact: true }).click();
@@ -262,7 +264,7 @@ try {
           (await page.locator(".task-log").innerText()).includes(issue.path),
         );
         await page.locator(".task-log").screenshot({
-          path: `output/playwright/content-${mobile ? "mobile" : "desktop"}-report-014.png`,
+          path: `output/playwright/content-${mobile ? "mobile" : "desktop"}-report-016.png`,
         });
       }
     }
@@ -272,23 +274,19 @@ try {
     const statusSelect = page.getByLabel("手动修改任务状态", { exact: true });
     await statusSelect.selectOption("READY");
     await page
-      .getByText("已手动标记为已完成；此标记不代表文档通过校验。", {
+      .getByText("已手动标记为已完成；此标记不会改变质量评分。", {
         exact: true,
       })
       .waitFor();
-    await page
-      .getByText("已生成，未通过规范或语言校验。当前文件为待修复候选。", {
-        exact: true,
-      })
-      .waitFor();
+        assert.equal(await page.locator(".validation-notice").count(), 0);
     await statusSelect.selectOption("FAILED");
     await page
-      .getByText("已手动标记为失败；此标记不代表文档通过校验。", {
+      .getByText("已手动标记为失败；此标记不会改变质量评分。", {
         exact: true,
       })
       .waitFor();
     await page.screenshot({
-      path: `output/playwright/content-${mobile ? "mobile" : "desktop"}-manual-014.png`,
+      path: `output/playwright/content-${mobile ? "mobile" : "desktop"}-manual-016.png`,
     });
     state = "ready";
     manualStatus = null;
@@ -302,7 +300,7 @@ try {
     await context.close();
   }
   console.log(
-    "Desktop/mobile: queued repair, English review, Chinese translation, failure reports, English documents, Chinese DNA/cards and preserved curation passed. API fixtures only.",
+    "Desktop/mobile: historical progress and failure states, no review banner, English documents, Chinese DNA/cards, manual status and preserved curation passed. API fixtures only.",
   );
 } finally {
   await browser.close();

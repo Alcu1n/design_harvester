@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { Analysis, Evidence } from "./contracts.ts";
 export type ContentIssue = { path: string; message: string; rule?: string };
 export const DisplayZhSchema = z.object({
+  visualFontStyle: z.string().min(1).max(12000).optional(),
   name: z.string().min(1).max(180),
   summary: z.string().min(4).max(12000),
   tags: z.array(z.string().min(1).max(80)).min(1).max(8),
@@ -33,8 +34,21 @@ export const TranslationReviewSchema = z.object({
   faithful: z.boolean(),
   issues: z.array(z.string()).max(30),
 });
-export const fingerprint = (value: unknown) =>
-  createHash("sha256").update(JSON.stringify(value)).digest("hex");
+export const fingerprint = (value: unknown) => {
+  const canonical = (v: unknown): unknown =>
+    Array.isArray(v)
+      ? v.map(canonical)
+      : v && typeof v === "object"
+        ? Object.fromEntries(
+            Object.entries(v)
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([k, x]) => [k, canonical(x)]),
+          )
+        : v;
+  return createHash("sha256")
+    .update(JSON.stringify(canonical(value)))
+    .digest("hex");
+};
 // Technical names found in supplied evidence are exempt; explanatory prose is not.
 export function englishIssues(
   value: unknown,

@@ -1,3 +1,5 @@
+import { restorePresentation } from "./presentation-job.ts";
+import { fallbackQuality, modelQuality } from "./quality.ts";
 import {
   providerInfo,
   modelMetadata,
@@ -8,37 +10,46 @@ import { eq } from "drizzle-orm";
 import { designs } from "./schema.ts";
 import { db, sql, transaction } from "./db.ts";
 import { validateURL, canonicalize } from "./security.ts";
-import { HarvestError } from "./contracts.ts";
+import { CriticSchema, HarvestError } from "./contracts.ts";
 import { files, getJSON, get, removeDesign, manifest } from "./storage.ts";
 import { getModelConfig } from "./model-settings.ts";
 export const versionsMetadata = (config: ModelConfig = providerInfo()) => ({
-  pipeline: "1.1.0",
+  pipeline: "1.3.0",
   extractor: "1.0.2",
   evidenceSchema: "1.0",
   analysis: "1.0",
   iosAdapter: "1.0",
-  prompt: "2.0",
+  prompt: "3.0",
   designMdSpec: "alpha",
-  designMdLinter: "0.4.0",
+  officialLint: "disabled",
   ...modelMetadata(config),
   language: "en",
   presentationLanguage: "zh-CN",
 });
 export async function createRun(
-  url: string,
+  url: string | null,
   existingDesign?: string,
   snapshotId?: string,
 ) {
-  const canonical = canonicalize(url);
+  const canonical = url ? canonicalize(url) : null;
   const config = await getModelConfig();
   return transaction(async (c) => {
     const proposed = randomUUID();
-    const d = (
-      await c.query(
-        "INSERT INTO designs(id,canonical_url) VALUES($1,$2) ON CONFLICT(canonical_url) DO UPDATE SET canonical_url=EXCLUDED.canonical_url RETURNING *",
-        [proposed, canonical],
-      )
-    ).rows[0];
+    const d = canonical
+      ? (
+          await c.query(
+            "INSERT INTO designs(id,canonical_url) VALUES($1,$2) ON CONFLICT(canonical_url) DO UPDATE SET canonical_url=EXCLUDED.canonical_url RETURNING *",
+            [proposed, canonical],
+          )
+        ).rows[0]
+      : (
+          await c.query(
+            "SELECT * FROM designs WHERE id=$1 AND source_kind='images'",
+            [existingDesign],
+          )
+        ).rows[0];
+    if (!d || (!canonical && !snapshotId))
+      throw new HarvestError("CONFLICT", "图片设计请使用已有快照重新生成。");
     if (existingDesign && d.id !== existingDesign)
       throw new Error("Design mismatch");
     if (
@@ -88,7 +99,7 @@ export async function listDesigns(search: URLSearchParams) {
         ? "v.score DESC NULLS LAST,d.created_at DESC"
         : "d.created_at DESC";
   const filter = `WHERE NOT EXISTS(SELECT 1 FROM deletion_queue q WHERE q.design_id=d.id) AND ($1='' OR concat_ws(' ',d.title,d.canonical_url,d.tags::text,v.analysis->>'name',v.analysis->>'summary',v.display_zh->>'name',v.display_zh->>'summary') ILIKE '%'||$1||'%') AND ($2='' OR d.tags ? $2 OR (v.analysis->'tags') ? $2 OR (v.display_zh->'tags') ? $2) AND ($3='' OR t.status=$3)`;
-  const from = `FROM designs d LEFT JOIN LATERAL (SELECT * FROM versions WHERE design_id=d.id ORDER BY (id=d.default_version_id) DESC NULLS LAST,created_at DESC LIMIT 1) v ON true LEFT JOIN LATERAL(SELECT * FROM tasks WHERE design_id=d.id ORDER BY created_at DESC LIMIT 1)t ON true`;
+  const from = `FROM designs d LEFT JOIN LATERAL (SELECT * FROM versions WHERE design_id=d.id ORDER BY (id=d.default_version_id) DESC NULLS LAST,created_at DESC LIMIT 1) v ON true LEFT JOIN LATERAL(SELECT * FROM tasks WHERE design_id=d.id AND kind<>'PRESENTATION' ORDER BY created_at DESC LIMIT 1)t ON true`;
   const items = await sql(
     `SELECT d.*,v.id AS version_id,v.snapshot_id,v.score,v.quality,v.analysis,v.display_zh,v.metadata,v.validation,t.status,t.stage,t.manual_status ${from} ${filter} ORDER BY ${order} LIMIT 24 OFFSET $4`,
     [query, tag, status, (page - 1) * 24],
@@ -100,10 +111,48 @@ export async function listDesigns(search: URLSearchParams) {
   ]);
   return { items, total: count.total, page };
 }
+async function ensureVersionScore(versionId: string) {
+  const [v] = await sql(
+    "SELECT v.* FROM versions v JOIN tasks t ON t.version_id=v.id WHERE v.id=$1 AND v.score IS NULL AND t.status NOT IN ('QUEUED','RUNNING')",
+    [versionId],
+  );
+  if (!v) return;
+  const prefix = `${v.design_id}/versions/${v.id}`;
+  const read = async (key: string) => getJSON(key).catch(() => undefined);
+  const evidence = await read(
+    `${v.design_id}/snapshots/${v.snapshot_id}/evidence.json`,
+  );
+  const old = CriticSchema.safeParse(await read(prefix + "/critic.json"));
+  const score = old.success
+    ? modelQuality(old.data, evidence)
+    : fallbackQuality({
+        analysis: v.analysis ?? (await read(prefix + "/analysis.json")),
+        ios: await read(prefix + "/ios-analysis.json"),
+        evidence,
+        markdown: await get(prefix + "/DESIGN.md")
+          .then((b) => b.toString())
+          .catch(() => ""),
+        reason: "此版本没有可用的模型评分",
+      });
+  const report = `${prefix}/quality-score.json`;
+  await sql(
+    "UPDATE versions SET score=$2,metadata=metadata||$3::jsonb WHERE id=$1 AND score IS NULL",
+    [
+      versionId,
+      score.score,
+      JSON.stringify({
+        scoringMethod: score.method,
+        scoringReport: report,
+        scoringResult: score,
+      }),
+    ],
+  );
+}
 export async function detail(id: string) {
   const [d] = await sql<{
     id: string;
-    canonical_url: string;
+    canonical_url: string | null;
+    source_kind: string;
     title: string | null;
     notes: string;
     tags: string[];
@@ -114,6 +163,16 @@ export async function detail(id: string) {
     [id],
   );
   if (!d) throw new HarvestError("NOT_FOUND", "设计条目不存在。");
+  for (const v of await sql(
+    "SELECT id FROM versions WHERE design_id=$1 AND score IS NULL",
+    [id],
+  ))
+    await ensureVersionScore(v.id);
+  const restore = await sql(
+    "SELECT * FROM versions WHERE design_id=$1 AND display_zh IS NULL",
+    [id],
+  );
+  for (const v of restore) await restorePresentation(v);
   const versions = await sql(
     "SELECT * FROM versions WHERE design_id=$1 ORDER BY created_at DESC",
     [id],
@@ -129,14 +188,15 @@ export async function setTaskStatus(id: string, status: "READY" | "FAILED") {
   if (!["READY", "FAILED"].includes(status))
     throw new HarvestError("CONFLICT", "请选择已完成或失败。");
   const rows = await sql(
-    `UPDATE tasks SET manual_status=jsonb_build_object('status',$2::text,'previousStatus',status,'time',now()),status=$2,cancel_requested=true,control_revision=control_revision+1,finished_at=now(),retry_at=NULL,dispatched_at=NULL,events=events||jsonb_build_array(jsonb_build_object('stage','MANUAL_STATUS_CHANGED','status',$2::text,'previousStatus',status,'time',now())) WHERE id=$1 RETURNING id`,
+    `UPDATE tasks SET manual_status=jsonb_build_object('status',$2::text,'previousStatus',status,'time',now()),status=$2,cancel_requested=true,control_revision=control_revision+1,finished_at=now(),retry_at=NULL,dispatched_at=NULL,events=events||jsonb_build_array(jsonb_build_object('stage','MANUAL_STATUS_CHANGED','status',$2::text,'previousStatus',status,'time',now())) WHERE id=$1 RETURNING id,version_id`,
     [id, status],
   );
   if (!rows.length) throw new HarvestError("NOT_FOUND", "任务不存在。");
+  await ensureVersionScore(rows[0].version_id);
 }
 export async function resume(id: string) {
   const [protectedVersion] = await sql(
-    "SELECT t.manual_status,t.design_id,t.snapshot_id,d.canonical_url FROM tasks t JOIN versions v ON v.id=t.version_id JOIN designs d ON d.id=t.design_id WHERE t.id=$1 AND v.quality='QUALIFIED'",
+    "SELECT t.manual_status,t.design_id,t.snapshot_id,d.canonical_url FROM tasks t JOIN versions v ON v.id=t.version_id JOIN designs d ON d.id=t.design_id WHERE t.id=$1 AND (v.quality='QUALIFIED' OR (v.quality='SCORED' AND t.stage='COMPLETE'))",
     [id],
   );
   if (protectedVersion?.manual_status)
@@ -147,7 +207,7 @@ export async function resume(id: string) {
     );
 
   const rows = await sql(
-    `UPDATE tasks SET status='QUEUED',manual_status=NULL,control_revision=control_revision+1,error=NULL,retry_at=NULL,attempts=0,finished_at=NULL,repair_state=CASE WHEN status IN ('FAILED','PARTIAL','CANCELED') AND repair_state IS NOT NULL THEN repair_state || '{"repairs":0,"fingerprints":{}}'::jsonb ELSE repair_state END,dispatched_at=NULL,cancel_requested=false WHERE id=$1 AND status IN ('FAILED','PARTIAL','WAITING_AUTH','WAITING_QUOTA','WAITING_CONFIG','CANCELED') RETURNING id`,
+    `UPDATE tasks SET status='QUEUED',manual_status=NULL,control_revision=control_revision+1,error=NULL,retry_at=NULL,attempts=0,finished_at=NULL,repair_state=CASE WHEN status IN ('FAILED','PARTIAL','CANCELED') AND repair_state IS NOT NULL THEN repair_state || '{"repairs":0,"fingerprints":{},"transportRetries":{}}'::jsonb ELSE repair_state END,dispatched_at=NULL,cancel_requested=false WHERE id=$1 AND status IN ('FAILED','PARTIAL','WAITING_AUTH','WAITING_QUOTA','WAITING_CONFIG','CANCELED') RETURNING id`,
     [id],
   );
   if (!rows.length) throw new HarvestError("CONFLICT", "当前任务无法恢复。");

@@ -17,6 +17,7 @@ services:
   migrate:
     build: { context: ., dockerfile: docker/Dockerfile, target: worker }
     command: [pnpm, db:migrate]
+    volumes: [imports:/data/imports]
     environment:
       DATABASE_URL: postgresql://harvester:${POSTGRES_PASSWORD}@postgres:5432/harvester
     depends_on:
@@ -31,7 +32,7 @@ services:
       LIBRARY_PATH: /data/library
       GEMINI_AUTH_HOME: /auth
       APP_ORIGIN: ${APP_ORIGIN:-http://localhost:3000}
-    volumes: [library:/data/library:ro]
+    volumes: [library:/data/library:ro, imports:/data/imports]
     depends_on:
       migrate: { condition: service_completed_successfully }
     networks: [backend, frontend]
@@ -51,7 +52,7 @@ services:
       GEMINI_MODEL: ${GEMINI_MODEL:-}
       GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
       HTTPS_PROXY: ${GEMINI_HTTPS_PROXY:-}
-    volumes: [library:/data/library, auth:/auth]
+    volumes: [library:/data/library, auth:/auth, imports:/data/imports]
     tmpfs: ["/work:uid=1000,gid=1000,mode=0700,size=536870912"]
     depends_on:
       migrate: { condition: service_completed_successfully }
@@ -87,3 +88,4 @@ volumes:
   database: {}
   library: {}
   auth: {}
+  imports: {}

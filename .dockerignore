@@ -26,4 +26,4 @@ Dockerfile
 deepseek_api
 
 .playwright-cli/
-output/playwright/
+output/
